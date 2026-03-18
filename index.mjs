@@ -1,0 +1,748 @@
+// decoy-scan — MCP supply chain scanner
+// Scans your MCP server configurations for risky tools, vulnerable packages, and suspicious servers.
+
+import { spawn } from "node:child_process";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { homedir, platform } from "node:os";
+
+// ─── Risk Classification ───
+
+const RISK_PATTERNS = {
+  critical: [
+    /^execute[_-]?command$/i, /^run[_-]?command$/i, /^shell$/i, /^bash$/i, /^exec$/i,
+    /^write[_-]?file$/i, /^create[_-]?file$/i, /^overwrite[_-]?file$/i,
+    /^make[_-]?payment$/i, /^send[_-]?payment$/i, /^transfer[_-]?funds$/i,
+    /^authorize[_-]?service$/i, /^grant[_-]?access$/i, /^elevate[_-]?privilege$/i,
+    /^modify[_-]?dns$/i, /^update[_-]?dns$/i,
+    /^delete[_-]?file$/i, /^remove[_-]?file$/i, /^unlink$/i,
+    /^drop[_-]?table$/i, /^delete[_-]?database$/i, /^truncate$/i,
+    /^eval$/i, /^spawn$/i, /^fork$/i,
+  ],
+  high: [
+    /^read[_-]?file$/i, /^get[_-]?file$/i, /^cat$/i,
+    /^http[_-]?request$/i, /^fetch$/i, /^curl$/i, /^wget$/i,
+    /^database[_-]?query$/i, /^sql[_-]?query$/i, /^run[_-]?query$/i, /^query$/i,
+    /^access[_-]?credentials$/i, /^get[_-]?credentials$/i, /^get[_-]?secrets$/i, /^get[_-]?password$/i,
+    /^send[_-]?email$/i, /^send[_-]?message$/i, /^send[_-]?notification$/i,
+    /^install[_-]?package$/i, /^npm[_-]?install$/i, /^pip[_-]?install$/i, /^apt[_-]?install$/i,
+    /^get[_-]?environment$/i, /^env[_-]?vars$/i, /^get[_-]?env$/i,
+    /^modify[_-]?config$/i, /^set[_-]?config$/i,
+  ],
+  medium: [
+    /^list[_-]?dir/i, /^list[_-]?files/i, /^readdir$/i,
+    /^search/i, /^find/i, /^glob/i, /^grep/i,
+    /^upload/i, /^download/i,
+    /^git[_-]/i,
+    /^browse/i, /^navigate/i, /^screenshot/i,
+  ],
+};
+
+export function classifyTool(tool) {
+  const name = tool.name || "";
+  const desc = (tool.description || "").toLowerCase();
+
+  for (const [level, patterns] of Object.entries(RISK_PATTERNS)) {
+    for (const pattern of patterns) {
+      if (pattern.test(name)) return level;
+    }
+  }
+
+  // Description-based fallback
+  if (/execut|command|shell|bash|sudo|spawn|fork|eval/.test(desc)) return "critical";
+  if (/delet|remov|drop|destruct|truncat|wipe|purge/.test(desc)) return "critical";
+  if (/read.*file|write.*file|filesystem|file.*system/.test(desc)) return "high";
+  if (/credentials|secret|password|api.?key|token|auth/.test(desc)) return "high";
+  if (/http|request|fetch|curl|wget|network/.test(desc)) return "high";
+  if (/database|query|sql|mongo|redis|dynamo/.test(desc)) return "high";
+  if (/email|message|notification|sms|slack/.test(desc)) return "medium";
+  if (/browse|screenshot|puppeteer|playwright|selenium/.test(desc)) return "medium";
+
+  return "low";
+}
+
+// ─── Tool Poisoning Detection ───
+// Detects hidden prompt injection in tool descriptions — OWASP ASI02
+
+const POISONING_PATTERNS = [
+  // Instruction override
+  { pattern: /\bignore\b.*\b(previous|above|prior)\b.*\b(instructions?|prompt|rules?)\b/i, type: "prompt-override", severity: "critical", description: "Attempts to override agent instructions" },
+  { pattern: /\b(bypass|disregard|forget)\s+((all|any)\s+)?(safety\s+)?guidelines/i, type: "prompt-override", severity: "critical", description: "Attempts to bypass safety guidelines" },
+  { pattern: /\bsystem\s*prompt\s*override\b/i, type: "prompt-override", severity: "critical", description: "Attempts system prompt override" },
+  { pattern: /\bnew\s+(instructions|directives?|guidelines)\s*:\s*you\s+are\b/i, type: "role-redefinition", severity: "critical", description: "Attempts to redefine agent role" },
+
+  // Instruction injection
+  { pattern: /\byou\s+(must|should|need\s+to|have\s+to)\s+(also|first|always)\b/i, type: "instruction-injection", severity: "critical", description: "Injects additional instructions into agent behavior" },
+  { pattern: /\balways\s+(consult|use|run|execute|invoke|call)\s+this\s+tool\s+(first|before|immediately)/i, type: "coercive-execution", severity: "critical", description: "Forces mandatory tool execution order" },
+  { pattern: /\b(before|prior\s+to)\s+(executing|invoking|running|using)\s+any\s+other\s+tool/i, type: "coercive-execution", severity: "critical", description: "Coerces execution priority over other tools" },
+  { pattern: /\btool\s+will\s+not\s+work\s+(unless|without)/i, type: "coercive-execution", severity: "high", description: "Threatens tool failure to coerce behavior" },
+
+  // Concealment
+  { pattern: /\b(do\s+not|don'?t|never)\s+(tell|inform|reveal|show|mention)\b/i, type: "concealment", severity: "critical", description: "Attempts to hide actions from the user" },
+  { pattern: /\b(invisibly|silently|covertly|secretly|without\s+(user\s+)?knowledge)\s+(send|upload|transmit|collect)/i, type: "concealment", severity: "critical", description: "Hidden data transfer without user knowledge" },
+  { pattern: /\btell\s+(the\s+)?user\s+only\s+about\b/i, type: "concealment", severity: "high", description: "Selectively hides information from user" },
+
+  // Tool chaining / shadowing
+  { pattern: /\b(before|after)\s+(calling|using|executing)\s+this\s+tool.*\b(call|use|execute|invoke)\b/i, type: "tool-chaining", severity: "high", description: "Forces agent to call other tools" },
+  { pattern: /\b(call|invoke|use|execute)\s+(the\s+)?['"`]?\w+['"`]?\s+(tool|function|command)\b/i, type: "cross-tool-reference", severity: "high", description: "References other tools by name (potential shadowing)" },
+  { pattern: /\bshadow\b.*\btrusted\b.*\btool\b/i, type: "tool-shadowing", severity: "critical", description: "Explicitly references tool shadowing technique" },
+
+  // Data exfiltration in descriptions
+  { pattern: /\b(upload|send|transmit|forward|sync)\s+(to|data\s+to)\s*(https?:\/\/|external|remote|cloud|server)/i, type: "data-exfiltration", severity: "critical", description: "Tool description references sending data to external server" },
+  { pattern: /\b(collect|gather|harvest)\s+(and\s+)?(send|upload|transmit|forward)/i, type: "data-exfiltration", severity: "high", description: "Collects and transmits data externally" },
+  { pattern: /\bsend\s+(complete\s+)?(conversation|chat|context|user\s+messages?)/i, type: "conversation-theft", severity: "critical", description: "Exfiltrates conversation history" },
+  { pattern: /\b(clipboard|pasteboard)\s+(content|data)?\s*(monitor|capture|send|upload)/i, type: "data-exfiltration", severity: "critical", description: "Monitors or exfiltrates clipboard contents" },
+
+  // Credential harvesting in descriptions
+  { pattern: /\b(extract|parse|scan|find)\s+(all\s+)?(api[_\s]?keys?|tokens?|credentials?|passwords?|secrets?)/i, type: "credential-harvesting", severity: "critical", description: "Extracts credentials from input" },
+  { pattern: /\b(index|cache|store|log)\s+(all\s+)?(api[_\s]?keys?|tokens?|credentials?|passwords?)/i, type: "credential-harvesting", severity: "critical", description: "Indexes or caches credentials" },
+  { pattern: /\bread\s+(and\s+pass\s+)?(the\s+)?contents?\s+of\s+[^\n]*\.(key|pem|ssh|env)/i, type: "credential-harvesting", severity: "critical", description: "Reads credential files (.key, .pem, .ssh, .env)" },
+
+  // Hidden parameter / shadow params
+  { pattern: /\b(hiddenParam|shadowTool|bypassChecks|sandboxEscape|internalOnly)\b/i, type: "shadow-parameters", severity: "critical", description: "Contains suspicious shadow parameter names" },
+  { pattern: /\b(hidden|secret)\s+(parameter|argument|input)\b/i, type: "shadow-parameters", severity: "high", description: "References hidden parameters" },
+
+  // Evasion techniques
+  { pattern: /<(script|iframe|object|embed|form|input|img\s+[^>]*onerror)[^>]*>/i, type: "hidden-markup", severity: "high", description: "Contains potentially dangerous HTML tags (script, iframe, form)" },
+  { pattern: /<!--[^>]*(SYSTEM|ADMIN|ignore|execute|override)/i, type: "html-comment-evasion", severity: "critical", description: "Hides instructions in HTML comments" },
+  { pattern: /\u200b|\u200c|\u200d|\ufeff|\u00ad/u, type: "invisible-chars", severity: "high", description: "Contains invisible Unicode characters" },
+  { pattern: /(\[\[\[|\|\|\|)(SYSTEM|ADMIN|HIDDEN|INTERNAL)/i, type: "hidden-markers", severity: "critical", description: "Uses bracket/pipe markers to hide instructions" },
+  { pattern: /\[(HIDDEN|INTERNAL|SECRET|PRIVATE)\s+(INSTRUCTION|DIRECTIVE|COMMAND)\]/i, type: "hidden-markers", severity: "critical", description: "Contains hidden instruction markers" },
+
+  // Role/conversation injection
+  { pattern: /\b(system|admin|root|superuser)\s*(prompt|mode|access|privilege)/i, type: "privilege-claim", severity: "high", description: "Claims elevated privileges" },
+  { pattern: /\b(grant\s+(me\s+)?admin|bypass\s+(all\s+)?security|sudo\s+mode|developer\s+mode\s+activate)/i, type: "privilege-escalation", severity: "critical", description: "Attempts privilege escalation" },
+  { pattern: /\[\s*(?:INST|SYS|SYSTEM)\s*\]/i, type: "role-injection", severity: "critical", description: "Attempts to inject system/instruction role markers" },
+  { pattern: /\bassistant\s*:\s*|human\s*:\s*|user\s*:\s*/i, type: "conversation-injection", severity: "high", description: "Injects fake conversation turns" },
+  { pattern: /\bimportant\s*:\s*this\s+tool\b/i, type: "authority-injection", severity: "medium", description: "Uses authority language to manipulate agent priority" },
+
+  // Tool poisoning (hidden secondary behavior)
+  { pattern: /\b(also|additionally|furthermore)\s+(collect|gather|extract|send|upload|index|store|monitor|track)/i, type: "hidden-secondary-action", severity: "high", description: "Describes hidden secondary actions beyond stated purpose" },
+  { pattern: /\b(during|while)\s+(processing|conversion|formatting|validation)\s*,?\s*(extract|collect|send|capture)/i, type: "hidden-secondary-action", severity: "high", description: "Hides actions within normal processing" },
+  { pattern: /\b(for|as)\s+(caching|optimization|performance)\s+(purposes?)\s*[,.]?\s*(send|upload|store|collect)/i, type: "hidden-secondary-action", severity: "high", description: "Disguises data collection as optimization" },
+  { pattern: /\b(actually|really|secretly|covertly|silently)\s+(does|performs?|executes?|sends?|collects?)/i, type: "hidden-secondary-action", severity: "critical", description: "Admits to covert functionality" },
+];
+
+export function detectPoisoning(tool) {
+  const text = `${tool.name || ""} ${tool.description || ""}`;
+  const findings = [];
+
+  for (const { pattern, type, severity, description } of POISONING_PATTERNS) {
+    if (pattern.test(text)) {
+      findings.push({ type, severity, description, match: text.match(pattern)?.[0]?.slice(0, 100) });
+    }
+  }
+
+  // Check description length — excessively long descriptions may hide injections
+  if ((tool.description || "").length > 1000) {
+    findings.push({ type: "excessive-length", severity: "medium", description: `Tool description is ${tool.description.length} chars (suspiciously long)` });
+  }
+
+  return findings;
+}
+
+// ─── Server Command Analysis ───
+// Checks if the server spawn command itself is suspicious
+
+export function analyzeServerCommand(entry) {
+  const cmd = entry.command || "";
+  const args = (entry.args || []).join(" ");
+  const full = `${cmd} ${args}`;
+  const findings = [];
+
+  // Running from temp/untrusted directories
+  if (/\/(tmp|temp|var\/tmp|dev\/shm)\//i.test(full)) {
+    findings.push({ type: "temp-directory", severity: "high", description: "Server runs from temporary directory" });
+  }
+
+  // Pipe to shell pattern
+  if (/curl.*\|\s*(sh|bash|zsh)|wget.*\|\s*(sh|bash|zsh)/i.test(full)) {
+    findings.push({ type: "pipe-to-shell", severity: "critical", description: "Server command pipes remote content to shell" });
+  }
+
+  // Suspicious binaries
+  if (/\b(nc|netcat|ncat|socat|telnet)\b/i.test(cmd)) {
+    findings.push({ type: "network-tool", severity: "high", description: `Server uses network tool: ${cmd}` });
+  }
+
+  // Base64 encoded arguments
+  if (/[A-Za-z0-9+/]{40,}={0,2}/.test(args)) {
+    findings.push({ type: "encoded-args", severity: "medium", description: "Arguments may contain base64-encoded content" });
+  }
+
+  // Python/Node one-liners (common for malicious MCP servers)
+  if (/python[23]?\s+-c\s+/i.test(full) || /node\s+-e\s+/i.test(full)) {
+    findings.push({ type: "inline-code", severity: "high", description: "Server runs inline code rather than a file" });
+  }
+
+  // Typosquatting indicators in npx commands
+  if (/npx\s+/.test(full)) {
+    const pkg = full.match(/npx\s+([a-z0-9@._/-]+)/i)?.[1];
+    if (pkg) {
+      // Known legitimate MCP packages
+      const known = new Set([
+        "@modelcontextprotocol/server-filesystem", "@modelcontextprotocol/server-github",
+        "@modelcontextprotocol/server-postgres", "@modelcontextprotocol/server-slack",
+        "@modelcontextprotocol/server-memory", "@modelcontextprotocol/server-fetch",
+        "@modelcontextprotocol/server-sqlite", "@modelcontextprotocol/server-puppeteer",
+        "@modelcontextprotocol/server-brave-search", "@modelcontextprotocol/server-everything",
+        "@modelcontextprotocol/server-sequential-thinking",
+        "decoy-mcp", "mcp-server-sqlite", "mcp-server-filesystem",
+      ]);
+      // Check for close-but-wrong names
+      if (!known.has(pkg) && /^@?m[ce]p-?server/i.test(pkg)) {
+        findings.push({ type: "potential-typosquat", severity: "high", description: `Package "${pkg}" resembles MCP server naming but isn't in known list` });
+      }
+    }
+  }
+
+  return findings;
+}
+
+// ─── Environment Variable Exposure Analysis ───
+
+const SENSITIVE_ENV_PATTERNS = [
+  { pattern: /api[_-]?key/i, type: "api-key" },
+  { pattern: /secret/i, type: "secret" },
+  { pattern: /token/i, type: "token" },
+  { pattern: /password|passwd/i, type: "password" },
+  { pattern: /private[_-]?key/i, type: "private-key" },
+  { pattern: /auth/i, type: "auth-credential" },
+  { pattern: /database[_-]?url|db[_-]?url|connection[_-]?string/i, type: "database-url" },
+  { pattern: /aws[_-]?(access|secret)/i, type: "aws-credential" },
+  { pattern: /github[_-]?token|gh[_-]?token/i, type: "github-token" },
+  { pattern: /stripe/i, type: "stripe-credential" },
+  { pattern: /openai/i, type: "openai-key" },
+  { pattern: /anthropic/i, type: "anthropic-key" },
+];
+
+export function analyzeEnvExposure(entry) {
+  const env = entry.env || {};
+  const findings = [];
+
+  for (const [key] of Object.entries(env)) {
+    for (const { pattern, type } of SENSITIVE_ENV_PATTERNS) {
+      if (pattern.test(key)) {
+        findings.push({
+          type: "env-exposure",
+          severity: "high",
+          description: `Passes ${type} to server via env var "${key}"`,
+          envVar: key,
+          // Never log the actual value
+        });
+        break;
+      }
+    }
+  }
+
+  return findings;
+}
+
+// ─── Readiness Analysis ───
+// Production readiness checks inspired by Cisco's approach — zero-dependency heuristics
+
+export function analyzeReadiness(tool) {
+  const findings = [];
+  const desc = (tool.description || "").toLowerCase();
+  const schema = tool.inputSchema || {};
+
+  // HEUR-001: Vague or missing description
+  if (!tool.description || tool.description.length < 20) {
+    findings.push({ type: "readiness-no-description", severity: "medium", description: "Tool has no or very short description — agents will misuse it" });
+  }
+
+  // HEUR-002: No input schema defined
+  if (!tool.inputSchema || Object.keys(tool.inputSchema).length === 0) {
+    findings.push({ type: "readiness-no-schema", severity: "medium", description: "Tool has no input schema — accepts arbitrary input" });
+  }
+
+  // HEUR-003: No required fields
+  if (schema.type === "object" && (!schema.required || schema.required.length === 0)) {
+    const propCount = Object.keys(schema.properties || {}).length;
+    if (propCount > 0) {
+      findings.push({ type: "readiness-no-required", severity: "low", description: `Tool has ${propCount} parameters but none are required` });
+    }
+  }
+
+  // HEUR-004: Overloaded tool scope
+  const scopeWords = (desc.match(/\b(and|also|plus|additionally|furthermore|as well as)\b/gi) || []).length;
+  if (scopeWords >= 3) {
+    findings.push({ type: "readiness-overloaded", severity: "low", description: `Tool description suggests overloaded scope (${scopeWords} conjunctions)` });
+  }
+
+  // HEUR-005: Dangerous operation keywords without safety hints
+  if (/\b(delet\w*|remov\w*|drop\w*|truncat\w*|destroy\w*|wipe|purge|overwrite|reset)\b/i.test(desc)) {
+    if (!/\b(confirm|safe|undo|backup|revert|dry.?run|preview)\b/i.test(desc)) {
+      findings.push({ type: "readiness-dangerous-no-safety", severity: "medium", description: "Destructive tool lacks safety hints (confirm, undo, dry-run)" });
+    }
+  }
+
+  return findings;
+}
+
+// ─── OWASP Agentic Top 10 Mapping ───
+
+const OWASP_MAP = {
+  // Tool risk classifications
+  "critical-tool": { id: "ASI02", name: "Unsafe Tool Use", description: "Critical-risk tool exposed to AI agent without guardrails" },
+  "high-tool": { id: "ASI02", name: "Unsafe Tool Use", description: "High-risk tool exposed to AI agent" },
+  // Goal hijacking (ASI01)
+  "prompt-override": { id: "ASI01", name: "Agent Goal Hijacking", description: "Tool description attempts to override agent instructions" },
+  "role-redefinition": { id: "ASI01", name: "Agent Goal Hijacking", description: "Tool attempts to redefine agent role" },
+  "instruction-injection": { id: "ASI01", name: "Agent Goal Hijacking", description: "Tool description injects instructions into agent behavior" },
+  "coercive-execution": { id: "ASI01", name: "Agent Goal Hijacking", description: "Tool coerces execution priority" },
+  "concealment": { id: "ASI01", name: "Agent Goal Hijacking", description: "Tool description attempts to conceal actions" },
+  "role-injection": { id: "ASI01", name: "Agent Goal Hijacking", description: "Tool injects system/role markers" },
+  "conversation-injection": { id: "ASI01", name: "Agent Goal Hijacking", description: "Tool injects fake conversation turns" },
+  "authority-injection": { id: "ASI01", name: "Agent Goal Hijacking", description: "Tool uses authority language" },
+  "privilege-claim": { id: "ASI01", name: "Agent Goal Hijacking", description: "Tool claims elevated privileges" },
+  "privilege-escalation": { id: "ASI01", name: "Agent Goal Hijacking", description: "Tool attempts privilege escalation" },
+  "hidden-markers": { id: "ASI01", name: "Agent Goal Hijacking", description: "Tool uses hidden instruction markers" },
+  "html-comment-evasion": { id: "ASI01", name: "Agent Goal Hijacking", description: "Tool hides instructions in HTML comments" },
+  // Unsafe tool use (ASI02)
+  "cross-tool-reference": { id: "ASI02", name: "Unsafe Tool Use", description: "Tool references other tools (potential shadowing)" },
+  "tool-shadowing": { id: "ASI02", name: "Unsafe Tool Use", description: "Tool explicitly references shadowing" },
+  "shadow-parameters": { id: "ASI02", name: "Unsafe Tool Use", description: "Tool contains shadow parameter names" },
+  "hidden-secondary-action": { id: "ASI02", name: "Unsafe Tool Use", description: "Tool has hidden secondary behaviors" },
+  // Supply chain (ASI03)
+  "potential-typosquat": { id: "ASI03", name: "Supply Chain Risk", description: "Server package may be typosquatted" },
+  "pipe-to-shell": { id: "ASI03", name: "Supply Chain Risk", description: "Server command pipes remote code to shell" },
+  "temp-directory": { id: "ASI03", name: "Supply Chain Risk", description: "Server runs from temporary directory" },
+  "inline-code": { id: "ASI03", name: "Supply Chain Risk", description: "Server runs inline code" },
+  "env-exposure": { id: "ASI03", name: "Supply Chain Risk", description: "Sensitive credentials passed to MCP server" },
+  // Data exfiltration
+  "data-exfiltration": { id: "ASI02", name: "Unsafe Tool Use", description: "Tool exfiltrates data to external server" },
+  "conversation-theft": { id: "ASI02", name: "Unsafe Tool Use", description: "Tool exfiltrates conversation history" },
+  "credential-harvesting": { id: "ASI02", name: "Unsafe Tool Use", description: "Tool harvests credentials" },
+  // Cascading failures (ASI05)
+  "tool-chaining": { id: "ASI05", name: "Cascading Failures", description: "Tool forces agent to invoke other tools" },
+};
+
+export function mapToOwasp(findingType) {
+  return OWASP_MAP[findingType] || null;
+}
+
+// ─── Host Config Discovery ───
+
+const HOST_CONFIGS = {
+  "Claude Desktop": () => {
+    const p = platform();
+    if (p === "darwin") return join(homedir(), "Library", "Application Support", "Claude", "claude_desktop_config.json");
+    if (p === "win32") return join(process.env.APPDATA || "", "Claude", "claude_desktop_config.json");
+    return join(homedir(), ".config", "claude", "claude_desktop_config.json");
+  },
+  "Cursor": () => {
+    const p = platform();
+    if (p === "darwin") return join(homedir(), "Library", "Application Support", "Cursor", "User", "globalStorage", "anysphere.cursor-mcp", "mcp.json");
+    if (p === "win32") return join(process.env.APPDATA || "", "Cursor", "User", "globalStorage", "anysphere.cursor-mcp", "mcp.json");
+    return join(homedir(), ".config", "Cursor", "User", "globalStorage", "anysphere.cursor-mcp", "mcp.json");
+  },
+  "Windsurf": () => {
+    const p = platform();
+    if (p === "darwin") return join(homedir(), "Library", "Application Support", "Windsurf", "User", "globalStorage", "codeium.windsurf-mcp", "mcp.json");
+    if (p === "win32") return join(process.env.APPDATA || "", "Windsurf", "User", "globalStorage", "codeium.windsurf-mcp", "mcp.json");
+    return join(homedir(), ".config", "Windsurf", "User", "globalStorage", "codeium.windsurf-mcp", "mcp.json");
+  },
+  "VS Code": () => {
+    const p = platform();
+    if (p === "darwin") return join(homedir(), "Library", "Application Support", "Code", "User", "settings.json");
+    if (p === "win32") return join(process.env.APPDATA || "", "Code", "User", "settings.json");
+    return join(homedir(), ".config", "Code", "User", "settings.json");
+  },
+  "Claude Code": () => join(homedir(), ".claude", "settings.json"),
+  "Claude Code (project)": () => join(process.cwd(), ".mcp.json"),
+  "Zed": () => {
+    const p = platform();
+    if (p === "darwin") return join(homedir(), "Library", "Application Support", "Zed", "settings.json");
+    if (p === "win32") return join(process.env.APPDATA || "", "Zed", "settings.json");
+    return join(homedir(), ".config", "zed", "settings.json");
+  },
+  "Cline": () => {
+    const p = platform();
+    if (p === "darwin") return join(homedir(), "Library", "Application Support", "Code", "User", "globalStorage", "saoudrizwan.claude-dev", "settings", "cline_mcp_settings.json");
+    if (p === "win32") return join(process.env.APPDATA || "", "Code", "User", "globalStorage", "saoudrizwan.claude-dev", "settings", "cline_mcp_settings.json");
+    return join(homedir(), ".config", "Code", "User", "globalStorage", "saoudrizwan.claude-dev", "settings", "cline_mcp_settings.json");
+  },
+};
+
+export function discoverConfigs() {
+  const found = [];
+  for (const [host, pathFn] of Object.entries(HOST_CONFIGS)) {
+    const configPath = pathFn();
+    if (existsSync(configPath)) {
+      try {
+        const raw = readFileSync(configPath, "utf8");
+        const config = JSON.parse(raw);
+        // Extract mcpServers from various config formats
+        let servers = config.mcpServers || config["mcp.servers"] || {};
+        // Zed stores context_servers differently
+        if (host === "Zed" && config.context_servers) {
+          servers = { ...servers, ...config.context_servers };
+        }
+        if (typeof servers !== "object") continue;
+        found.push({ host, configPath, servers });
+      } catch {
+        // Skip malformed configs
+      }
+    }
+  }
+  return found;
+}
+
+// ─── Server Probing ───
+
+export function probeServer(name, entry, env = {}) {
+  return new Promise((resolve) => {
+    const timeout = 15000;
+    const cmd = entry.command;
+    const args = entry.args || [];
+    const serverEnv = { ...process.env, ...env, ...(entry.env || {}) };
+
+    let proc;
+    try {
+      proc = spawn(cmd, args, {
+        env: serverEnv,
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout,
+      });
+    } catch (e) {
+      resolve({ name, error: `Failed to spawn: ${e.message}`, tools: [] });
+      return;
+    }
+
+    let stdout = "";
+    let resolved = false;
+    let initDone = false;
+
+    const finish = (result) => {
+      if (resolved) return;
+      resolved = true;
+      try { proc.kill(); } catch {}
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => finish({ name, error: "Timeout (15s)", tools: [] }), timeout);
+
+    proc.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+      const lines = stdout.split("\n");
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const msg = JSON.parse(line.trim());
+
+          // Wait for initialize response, then send tools/list
+          if (!initDone && msg.id === 1 && msg.result) {
+            initDone = true;
+            const notif = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} });
+            const list = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
+            try {
+              proc.stdin.write(notif + "\n");
+              proc.stdin.write(list + "\n");
+            } catch {
+              finish({ name, error: "Failed to send tools/list", tools: [] });
+            }
+          }
+
+          // Got tools/list response
+          if (msg.id === 2 && msg.result?.tools) {
+            clearTimeout(timer);
+            finish({ name, tools: msg.result.tools, error: null });
+            return;
+          }
+        } catch {}
+      }
+    });
+
+    proc.on("error", (e) => {
+      clearTimeout(timer);
+      finish({ name, error: e.message, tools: [] });
+    });
+
+    proc.on("exit", (code) => {
+      clearTimeout(timer);
+      if (!resolved) finish({ name, error: `Exited with code ${code}`, tools: [] });
+    });
+
+    // Send MCP initialize
+    const init = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "decoy-scan", version: "0.1.0" } } });
+
+    try {
+      proc.stdin.write(init + "\n");
+    } catch {
+      clearTimeout(timer);
+      finish({ name, error: "Failed to write to stdin", tools: [] });
+    }
+  });
+}
+
+// ─── Advisory Check ───
+
+const ADVISORY_API = "https://app.decoy.run/monitor/mcp";
+
+export async function checkAdvisories() {
+  try {
+    const res = await fetch(ADVISORY_API);
+    if (!res.ok) return { threats: [], error: null };
+    return await res.json();
+  } catch (e) {
+    return { threats: [], error: e.message };
+  }
+}
+
+export function matchAdvisories(serverEntry, advisories) {
+  const cmd = (serverEntry.command || "").toLowerCase();
+  const args = (serverEntry.args || []).join(" ").toLowerCase();
+  const full = `${cmd} ${args}`;
+
+  const matches = [];
+  for (const threat of advisories) {
+    for (const pkg of (threat.affectedPackages || [])) {
+      if (full.includes(pkg.toLowerCase())) {
+        matches.push(threat);
+        break;
+      }
+    }
+  }
+  return matches;
+}
+
+// ─── Full Scan ───
+
+export async function scan({ probe = true, advisories = true } = {}) {
+  const configs = discoverConfigs();
+  const results = {
+    timestamp: new Date().toISOString(),
+    hosts: configs.map(c => c.host),
+    servers: [],
+    summary: { total: 0, critical: 0, high: 0, medium: 0, low: 0, errors: 0, poisoned: 0, suspicious: 0, envExposures: 0, readiness: 0 },
+    advisories: [],
+    owasp: {},
+  };
+
+  // Deduplicate servers across hosts
+  const serverMap = new Map();
+  for (const { host, servers } of configs) {
+    for (const [name, entry] of Object.entries(servers)) {
+      if (!serverMap.has(name)) {
+        serverMap.set(name, { entry, hosts: [host] });
+      } else {
+        serverMap.get(name).hosts.push(host);
+      }
+    }
+  }
+
+  // Probe servers in parallel
+  const probePromises = [];
+  const serverOrder = [];
+  for (const [name, { entry, hosts }] of serverMap) {
+    serverOrder.push({ name, entry, hosts });
+    if (probe) {
+      probePromises.push(probeServer(name, entry));
+    } else {
+      probePromises.push(Promise.resolve({ name, tools: [], error: null }));
+    }
+  }
+
+  const probeResults = await Promise.all(probePromises);
+
+  for (let i = 0; i < serverOrder.length; i++) {
+    const { name, entry, hosts } = serverOrder[i];
+    const probeResult = probeResults[i];
+
+    const server = {
+      name,
+      hosts,
+      command: entry.command,
+      args: entry.args || [],
+      tools: [],
+      risk: "low",
+      error: probeResult.error || null,
+      findings: [],
+    };
+
+    if (probeResult.error) {
+      results.summary.errors++;
+    }
+
+    // Classify tools
+    server.tools = probeResult.tools.map(t => {
+      const risk = classifyTool(t);
+      const poisoning = detectPoisoning(t);
+      return {
+        name: t.name,
+        description: (t.description || "").slice(0, 500),
+        risk,
+        poisoning: poisoning.length > 0 ? poisoning : undefined,
+      };
+    });
+
+    // Tool poisoning findings
+    for (const tool of server.tools) {
+      if (tool.poisoning) {
+        for (const p of tool.poisoning) {
+          server.findings.push({ ...p, tool: tool.name, source: "tool-description" });
+          results.summary.poisoned++;
+        }
+      }
+    }
+
+    // Server command analysis
+    const cmdFindings = analyzeServerCommand(entry);
+    for (const f of cmdFindings) {
+      server.findings.push({ ...f, source: "server-command" });
+      results.summary.suspicious++;
+    }
+
+    // Env var exposure analysis
+    const envFindings = analyzeEnvExposure(entry);
+    for (const f of envFindings) {
+      server.findings.push({ ...f, source: "env-config" });
+      results.summary.envExposures++;
+    }
+
+    // Readiness checks per tool
+    for (const tool of probeResult.tools) {
+      const readinessFindings = analyzeReadiness(tool);
+      for (const f of readinessFindings) {
+        server.findings.push({ ...f, tool: tool.name, source: "readiness" });
+        results.summary.readiness++;
+      }
+    }
+
+    // Tool count warning
+    if (server.tools.length > 50) {
+      server.findings.push({
+        type: "excessive-tools",
+        severity: "medium",
+        description: `Server exposes ${server.tools.length} tools — large attack surface`,
+        source: "tool-count",
+      });
+    }
+
+    // Classify server risk = worst across tools + findings
+    const toolRisks = server.tools.map(t => t.risk);
+    const findingRisks = server.findings.map(f => f.severity);
+    const allRisks = [...toolRisks, ...findingRisks];
+    if (allRisks.includes("critical")) server.risk = "critical";
+    else if (allRisks.includes("high")) server.risk = "high";
+    else if (allRisks.includes("medium")) server.risk = "medium";
+
+    // OWASP mapping
+    for (const f of server.findings) {
+      const owasp = mapToOwasp(f.type);
+      if (owasp) {
+        if (!results.owasp[owasp.id]) results.owasp[owasp.id] = { ...owasp, count: 0 };
+        results.owasp[owasp.id].count++;
+      }
+    }
+    for (const tool of server.tools) {
+      if (tool.risk === "critical" || tool.risk === "high") {
+        const key = `${tool.risk}-tool`;
+        const owasp = mapToOwasp(key);
+        if (owasp) {
+          if (!results.owasp[owasp.id]) results.owasp[owasp.id] = { ...owasp, count: 0 };
+          results.owasp[owasp.id].count++;
+        }
+      }
+    }
+
+    results.summary.total++;
+    results.summary[server.risk]++;
+    results.servers.push(server);
+  }
+
+  // Check advisories
+  if (advisories) {
+    const advData = await checkAdvisories();
+    if (advData.threats?.length > 0) {
+      for (const { name, entry } of serverOrder) {
+        const matches = matchAdvisories(entry, advData.threats);
+        for (const m of matches) {
+          results.advisories.push({ server: name, ...m });
+        }
+      }
+    }
+  }
+
+  return results;
+}
+
+// ─── SARIF Output ───
+
+export function toSarif(results) {
+  const rules = [];
+  const sarifResults = [];
+  const ruleIndex = new Map();
+
+  for (const server of results.servers) {
+    // Tool risk rules
+    for (const tool of server.tools) {
+      if (tool.risk === "low") continue;
+
+      const ruleId = `mcp-tool-${tool.risk}-${tool.name}`;
+      if (!ruleIndex.has(ruleId)) {
+        ruleIndex.set(ruleId, rules.length);
+        const owasp = mapToOwasp(`${tool.risk}-tool`);
+        rules.push({
+          id: ruleId,
+          shortDescription: { text: `${tool.risk.toUpperCase()} risk MCP tool: ${tool.name}` },
+          fullDescription: { text: tool.description },
+          defaultConfiguration: {
+            level: tool.risk === "critical" ? "error" : tool.risk === "high" ? "warning" : "note",
+          },
+          ...(owasp ? { helpUri: `https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/#${owasp.id.toLowerCase()}`, properties: { tags: [owasp.id, owasp.name] } } : {}),
+        });
+      }
+
+      sarifResults.push({
+        ruleId,
+        ruleIndex: ruleIndex.get(ruleId),
+        level: tool.risk === "critical" ? "error" : tool.risk === "high" ? "warning" : "note",
+        message: { text: `Server "${server.name}" exposes ${tool.risk}-risk tool "${tool.name}": ${tool.description}` },
+        locations: [{ physicalLocation: { artifactLocation: { uri: server.name } } }],
+      });
+    }
+
+    // Finding rules (poisoning, command analysis, env exposure)
+    for (const finding of server.findings) {
+      const ruleId = `mcp-${finding.type}`;
+      if (!ruleIndex.has(ruleId)) {
+        ruleIndex.set(ruleId, rules.length);
+        const owasp = mapToOwasp(finding.type);
+        rules.push({
+          id: ruleId,
+          shortDescription: { text: finding.description },
+          defaultConfiguration: {
+            level: finding.severity === "critical" ? "error" : finding.severity === "high" ? "warning" : "note",
+          },
+          ...(owasp ? { helpUri: `https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/#${owasp.id.toLowerCase()}`, properties: { tags: [owasp.id, owasp.name] } } : {}),
+        });
+      }
+
+      sarifResults.push({
+        ruleId,
+        ruleIndex: ruleIndex.get(ruleId),
+        level: finding.severity === "critical" ? "error" : finding.severity === "high" ? "warning" : "note",
+        message: { text: `Server "${server.name}": ${finding.description}${finding.tool ? ` (tool: ${finding.tool})` : ""}` },
+        locations: [{ physicalLocation: { artifactLocation: { uri: server.name } } }],
+      });
+    }
+  }
+
+  return {
+    $schema: "https://json.schemastore.org/sarif-2.1.0.json",
+    version: "2.1.0",
+    runs: [{
+      tool: {
+        driver: {
+          name: "decoy-scan",
+          version: "0.1.0",
+          informationUri: "https://decoy.run",
+          rules,
+        },
+      },
+      results: sarifResults,
+    }],
+  };
+}
