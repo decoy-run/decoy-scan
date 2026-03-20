@@ -124,7 +124,10 @@ async function main() {
                     f.source === "server-command" ? "COMMAND" :
                     f.source === "env-config" ? "ENV" :
                     f.source === "tool-count" ? "SURFACE" :
-                    f.source === "readiness" ? "READINESS" : "FINDING";
+                    f.source === "readiness" ? "READINESS" :
+                    f.source === "transport" ? "TRANSPORT" :
+                    f.source === "input-sanitization" ? "INPUT" :
+                    f.source === "permission-scope" ? "SCOPE" : "FINDING";
       console.log(`    ${fc}${label.padEnd(9)}${RESET} ${f.description}${f.tool ? ` ${DIM}(${f.tool})${RESET}` : ""}`);
     }
 
@@ -187,6 +190,9 @@ async function main() {
   if (s.suspicious > 0) console.log(`  ${ORANGE}${s.suspicious} suspicious command${s.suspicious !== 1 ? "s" : ""}${RESET}`);
   if (s.envExposures > 0) console.log(`  ${ORANGE}${s.envExposures} env exposure${s.envExposures !== 1 ? "s" : ""}${RESET}`);
   if (s.readiness > 0) console.log(`  ${YELLOW}${s.readiness} readiness issue${s.readiness !== 1 ? "s" : ""}${RESET}`);
+  if (s.transportIssues > 0) console.log(`  ${ORANGE}${s.transportIssues} transport issue${s.transportIssues !== 1 ? "s" : ""}${RESET}`);
+  if (s.sanitizationIssues > 0) console.log(`  ${YELLOW}${s.sanitizationIssues} input sanitization issue${s.sanitizationIssues !== 1 ? "s" : ""}${RESET}`);
+  if (s.scopeIssues > 0) console.log(`  ${ORANGE}${s.scopeIssues} permission scope issue${s.scopeIssues !== 1 ? "s" : ""}${RESET}`);
   if (results.advisories.length > 0) console.log(`  ${RED}${results.advisories.length} advisory match${results.advisories.length !== 1 ? "es" : ""}${RESET}`);
 
   const exit = s.critical > 0 || s.poisoned > 0 ? 2 : s.high > 0 ? 1 : 0;

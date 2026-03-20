@@ -238,6 +238,77 @@ export function analyzeEnvExposure(entry) {
   return findings;
 }
 
+// ─── SSE Transport Security ───
+
+export function analyzeTransport(entry) {
+  const findings = [];
+  const cmd = entry.command || "";
+  const args = (entry.args || []).join(" ");
+  const full = `${cmd} ${args}`;
+  const env = entry.env || {};
+  const url = entry.url || "";  // Some configs use url for SSE servers
+
+  // Check if this is an SSE/HTTP transport server
+  const isSSE = !!(entry.url || /\b(sse|server-sent|streamable-http)\b/i.test(full) ||
+    /--transport\s+(sse|http)/i.test(full) ||
+    entry.transport === "sse" || entry.transport === "streamable-http");
+
+  if (!isSSE && !url) return findings;
+
+  // SSE-001: HTTP instead of HTTPS
+  const targetUrl = url || full.match(/https?:\/\/[^\s"']+/)?.[0] || "";
+  if (targetUrl && /^http:\/\//i.test(targetUrl) && !/localhost|127\.0\.0\.1|::1|\[::1\]/.test(targetUrl)) {
+    findings.push({
+      type: "sse-no-tls",
+      severity: "critical",
+      description: "SSE transport uses unencrypted HTTP — credentials and tool calls transmitted in plaintext",
+    });
+  }
+
+  // SSE-002: No authentication configured
+  const hasAuth = env.API_KEY || env.AUTH_TOKEN || env.BEARER_TOKEN || env.ACCESS_TOKEN ||
+    /--auth|--token|--api-key|--bearer|authorization/i.test(full) ||
+    Object.keys(env).some(k => /auth|bearer|api.?key/i.test(k));
+  if (isSSE && !hasAuth) {
+    findings.push({
+      type: "sse-no-auth",
+      severity: "high",
+      description: "SSE server has no visible authentication configured — any client can connect",
+    });
+  }
+
+  // SSE-003: Wildcard CORS or permissive origin
+  if (/--cors\s+\*|cors.*origin.*\*|CORS_ORIGIN.*\*/i.test(full) || env.CORS_ORIGIN === "*") {
+    findings.push({
+      type: "sse-cors-wildcard",
+      severity: "high",
+      description: "SSE server allows wildcard CORS origin — vulnerable to cross-origin attacks",
+    });
+  }
+
+  // SSE-004: Exposed on 0.0.0.0 or public interface
+  if (/\b0\.0\.0\.0\b|--host\s+0\.0\.0\.0|BIND_ADDRESS.*0\.0\.0\.0/i.test(full) ||
+      env.HOST === "0.0.0.0" || env.BIND_ADDRESS === "0.0.0.0") {
+    findings.push({
+      type: "sse-public-bind",
+      severity: "high",
+      description: "SSE server binds to all interfaces (0.0.0.0) — accessible from network",
+    });
+  }
+
+  // SSE-005: No rate limiting or connection limit visible
+  if (isSSE && !/rate.?limit|max.?connections|throttl/i.test(full) &&
+      !Object.keys(env).some(k => /rate|limit|throttl|max.?conn/i.test(k))) {
+    findings.push({
+      type: "sse-no-rate-limit",
+      severity: "medium",
+      description: "SSE server has no visible rate limiting — vulnerable to connection exhaustion",
+    });
+  }
+
+  return findings;
+}
+
 // ─── Readiness Analysis ───
 // Production readiness checks inspired by Cisco's approach — zero-dependency heuristics
 
@@ -280,6 +351,167 @@ export function analyzeReadiness(tool) {
   return findings;
 }
 
+// ─── Input Sanitization Validation ───
+
+export function analyzeInputSanitization(tool) {
+  const findings = [];
+  const schema = tool.inputSchema || {};
+  const props = schema.properties || {};
+  const name = tool.name || "";
+  const risk = classifyTool(tool);
+
+  // Only check medium+ risk tools — low-risk tools with loose schemas are fine
+  if (risk === "low") return findings;
+
+  // SAN-001: No type constraints on properties
+  for (const [propName, propSchema] of Object.entries(props)) {
+    if (!propSchema.type && !propSchema.enum && !propSchema.oneOf && !propSchema.anyOf) {
+      findings.push({
+        type: "sanitization-no-type",
+        severity: "medium",
+        description: `Parameter "${propName}" has no type constraint — accepts any value`,
+      });
+    }
+  }
+
+  // SAN-002: String params on dangerous tools without validation
+  const dangerousParams = /command|query|sql|script|code|exec|shell|url|path|file/i;
+  for (const [propName, propSchema] of Object.entries(props)) {
+    if (propSchema.type === "string" && dangerousParams.test(propName)) {
+      const hasConstraint = propSchema.pattern || propSchema.enum || propSchema.maxLength ||
+        propSchema.format || propSchema.const;
+      if (!hasConstraint) {
+        findings.push({
+          type: "sanitization-unconstrained-dangerous",
+          severity: risk === "critical" ? "high" : "medium",
+          description: `Dangerous parameter "${propName}" accepts unconstrained string input`,
+        });
+      }
+    }
+  }
+
+  // SAN-003: No maxLength on string parameters (for high+ risk tools)
+  if (risk === "critical" || risk === "high") {
+    const stringParams = Object.entries(props).filter(([, s]) => s.type === "string" && !s.maxLength && !s.enum);
+    if (stringParams.length > 0) {
+      findings.push({
+        type: "sanitization-no-maxlength",
+        severity: "low",
+        description: `${stringParams.length} string parameter${stringParams.length > 1 ? "s" : ""} without maxLength on ${risk}-risk tool`,
+      });
+    }
+  }
+
+  // SAN-004: Object/array params without schema constraints
+  for (const [propName, propSchema] of Object.entries(props)) {
+    if (propSchema.type === "object" && !propSchema.properties && !propSchema.additionalProperties) {
+      findings.push({
+        type: "sanitization-open-object",
+        severity: "medium",
+        description: `Parameter "${propName}" accepts arbitrary object without property constraints`,
+      });
+    }
+    if (propSchema.type === "array" && !propSchema.items && !propSchema.maxItems) {
+      findings.push({
+        type: "sanitization-open-array",
+        severity: "medium",
+        description: `Parameter "${propName}" accepts unbounded array without item constraints`,
+      });
+    }
+  }
+
+  // SAN-005: additionalProperties not explicitly false on critical tools
+  if (risk === "critical" && schema.type === "object" && schema.additionalProperties !== false && Object.keys(props).length > 0) {
+    findings.push({
+      type: "sanitization-additional-props",
+      severity: "low",
+      description: "Critical tool schema allows additional properties beyond defined parameters",
+    });
+  }
+
+  return findings;
+}
+
+// ─── Permission Scope Scoring ───
+
+export function analyzePermissionScope(tools) {
+  const findings = [];
+
+  // Build capability map
+  const capabilities = {
+    filesystem: { read: false, write: false },
+    network: { inbound: false, outbound: false },
+    execution: { shell: false, code: false },
+    data: { database: false, credentials: false },
+    communication: { email: false, messaging: false },
+    infrastructure: { dns: false, deploy: false, billing: false },
+  };
+
+  const capPatterns = {
+    "filesystem.read": /read[_-]?file|get[_-]?file|cat|list[_-]?dir|readdir|glob|find/i,
+    "filesystem.write": /write[_-]?file|create[_-]?file|overwrite|delete[_-]?file|remove[_-]?file/i,
+    "network.outbound": /http[_-]?request|fetch|curl|wget|upload|download/i,
+    "execution.shell": /execute[_-]?command|run[_-]?command|shell|bash|exec/i,
+    "execution.code": /eval|spawn|fork|install[_-]?package/i,
+    "data.database": /database[_-]?query|sql[_-]?query|run[_-]?query/i,
+    "data.credentials": /access[_-]?credentials|get[_-]?secrets|get[_-]?password|environment[_-]?var/i,
+    "communication.email": /send[_-]?email/i,
+    "communication.messaging": /send[_-]?message|slack|notification/i,
+    "infrastructure.dns": /modify[_-]?dns|update[_-]?dns/i,
+    "infrastructure.deploy": /deploy|kubernetes|docker|jenkins/i,
+    "infrastructure.billing": /make[_-]?payment|transfer|billing|invoice/i,
+  };
+
+  for (const tool of tools) {
+    const name = tool.name || "";
+    for (const [capPath, pattern] of Object.entries(capPatterns)) {
+      if (pattern.test(name)) {
+        const [category, sub] = capPath.split(".");
+        capabilities[category][sub] = true;
+      }
+    }
+  }
+
+  // Count active capability domains
+  const activeDomains = Object.entries(capabilities).filter(([, subs]) =>
+    Object.values(subs).some(v => v)
+  ).map(([name]) => name);
+
+  // SCOPE-001: God-mode server (4+ capability domains)
+  if (activeDomains.length >= 4) {
+    findings.push({
+      type: "scope-overprivileged",
+      severity: "high",
+      description: `Server has ${activeDomains.length}/6 capability domains (${activeDomains.join(", ")}) — likely over-scoped`,
+    });
+  }
+
+  // SCOPE-002: Dangerous combos
+  if (capabilities.execution.shell && capabilities.network.outbound) {
+    findings.push({
+      type: "scope-dangerous-combo",
+      severity: "critical",
+      description: "Server combines shell execution with network access — enables remote code execution chains",
+    });
+  }
+  if (capabilities.data.credentials && capabilities.network.outbound) {
+    findings.push({
+      type: "scope-dangerous-combo",
+      severity: "critical",
+      description: "Server combines credential access with network access — enables credential exfiltration",
+    });
+  }
+  if (capabilities.filesystem.write && capabilities.execution.shell) {
+    findings.push({
+      type: "scope-dangerous-combo",
+      severity: "high",
+      description: "Server combines file write with shell execution — enables persistent code execution",
+    });
+  }
+
+  return findings;
+}
+
 // ─── OWASP Agentic Top 10 Mapping ───
 
 const OWASP_MAP = {
@@ -316,6 +548,22 @@ const OWASP_MAP = {
   "credential-harvesting": { id: "ASI02", name: "Unsafe Tool Use", description: "Tool harvests credentials" },
   // Cascading failures (ASI05)
   "tool-chaining": { id: "ASI05", name: "Cascading Failures", description: "Tool forces agent to invoke other tools" },
+  // Transport security (ASI03)
+  "sse-no-tls": { id: "ASI03", name: "Supply Chain Risk", description: "SSE transport lacks TLS encryption" },
+  "sse-no-auth": { id: "ASI03", name: "Supply Chain Risk", description: "SSE transport has no authentication" },
+  "sse-cors-wildcard": { id: "ASI03", name: "Supply Chain Risk", description: "SSE transport allows wildcard CORS" },
+  "sse-public-bind": { id: "ASI03", name: "Supply Chain Risk", description: "SSE transport exposed on public interface" },
+  "sse-no-rate-limit": { id: "ASI03", name: "Supply Chain Risk", description: "SSE transport lacks rate limiting" },
+  // Input sanitization (ASI02)
+  "sanitization-no-type": { id: "ASI02", name: "Unsafe Tool Use", description: "Tool parameter lacks type constraint" },
+  "sanitization-unconstrained-dangerous": { id: "ASI02", name: "Unsafe Tool Use", description: "Dangerous parameter accepts unconstrained input" },
+  "sanitization-no-maxlength": { id: "ASI02", name: "Unsafe Tool Use", description: "String parameters without length limits" },
+  "sanitization-open-object": { id: "ASI02", name: "Unsafe Tool Use", description: "Object parameter without property constraints" },
+  "sanitization-open-array": { id: "ASI02", name: "Unsafe Tool Use", description: "Array parameter without item or length constraints" },
+  "sanitization-additional-props": { id: "ASI02", name: "Unsafe Tool Use", description: "Schema allows additional properties" },
+  // Permission scope (ASI02)
+  "scope-overprivileged": { id: "ASI02", name: "Unsafe Tool Use", description: "Server has excessive capability scope" },
+  "scope-dangerous-combo": { id: "ASI02", name: "Unsafe Tool Use", description: "Server has dangerous capability combination" },
 };
 
 export function mapToOwasp(findingType) {
@@ -515,7 +763,7 @@ export async function scan({ probe = true, advisories = true } = {}) {
     timestamp: new Date().toISOString(),
     hosts: configs.map(c => c.host),
     servers: [],
-    summary: { total: 0, critical: 0, high: 0, medium: 0, low: 0, errors: 0, poisoned: 0, suspicious: 0, envExposures: 0, readiness: 0 },
+    summary: { total: 0, critical: 0, high: 0, medium: 0, low: 0, errors: 0, poisoned: 0, suspicious: 0, envExposures: 0, readiness: 0, transportIssues: 0, sanitizationIssues: 0, scopeIssues: 0 },
     advisories: [],
     owasp: {},
   };
@@ -601,12 +849,28 @@ export async function scan({ probe = true, advisories = true } = {}) {
       results.summary.envExposures++;
     }
 
+    // Transport security analysis
+    const transportFindings = analyzeTransport(entry);
+    for (const f of transportFindings) {
+      server.findings.push({ ...f, source: "transport" });
+      results.summary.transportIssues++;
+    }
+
     // Readiness checks per tool
     for (const tool of probeResult.tools) {
       const readinessFindings = analyzeReadiness(tool);
       for (const f of readinessFindings) {
         server.findings.push({ ...f, tool: tool.name, source: "readiness" });
         results.summary.readiness++;
+      }
+    }
+
+    // Input sanitization per tool
+    for (const tool of probeResult.tools) {
+      const sanitizationFindings = analyzeInputSanitization(tool);
+      for (const f of sanitizationFindings) {
+        server.findings.push({ ...f, tool: tool.name, source: "input-sanitization" });
+        results.summary.sanitizationIssues++;
       }
     }
 
@@ -618,6 +882,13 @@ export async function scan({ probe = true, advisories = true } = {}) {
         description: `Server exposes ${server.tools.length} tools — large attack surface`,
         source: "tool-count",
       });
+    }
+
+    // Permission scope analysis
+    const scopeFindings = analyzePermissionScope(probeResult.tools);
+    for (const f of scopeFindings) {
+      server.findings.push({ ...f, source: "permission-scope" });
+      results.summary.scopeIssues++;
     }
 
     // Classify server risk = worst across tools + findings
