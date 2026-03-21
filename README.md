@@ -2,7 +2,7 @@
 
 Security scanner for MCP server configurations. Like `npm audit`, but for your AI agent tool servers.
 
-Scans Claude Desktop, Cursor, Windsurf, VS Code, Claude Code, Zed, and Cline. Finds risky tools, detects tool poisoning, checks for vulnerable packages, and maps findings to the OWASP Agentic Top 10. No account required.
+Scans Claude Desktop, Cursor, Windsurf, VS Code, Claude Code, Zed, and Cline. Finds risky tools, detects tool poisoning, validates input sanitization, checks SSE transport security, scores permission scope, and maps everything to the OWASP Agentic Top 10. No account required.
 
 ## Quick Start
 
@@ -50,11 +50,34 @@ Flags when sensitive credentials are passed to MCP servers via env config:
 ### Supply Chain Advisories
 Cross-references installed MCP servers against the [Decoy advisory database](https://app.decoy.run/monitor/mcp) — known vulnerabilities in 40+ MCP server packages and AI agent frameworks.
 
+### Transport Security (SSE)
+Checks for insecure Server-Sent Events configurations:
+- HTTP without TLS (credentials in plaintext)
+- Missing authentication on SSE endpoints
+- Wildcard CORS origins
+- Servers bound to all interfaces (0.0.0.0)
+- Missing rate limiting
+
+### Input Sanitization Validation
+Validates that tool schemas properly constrain inputs:
+- Parameters without type constraints
+- Unconstrained dangerous parameters (`command`, `query`, `path`, `url`)
+- Missing `maxLength` on string inputs for high-risk tools
+- Open object/array parameters without item or property constraints
+- Schemas allowing `additionalProperties` on critical tools
+
+### Permission Scope Analysis
+Scores the aggregate capability scope across all tools in a server:
+- Over-privileged servers with 4+ capability domains
+- Dangerous combinations: shell execution + network access (RCE chains)
+- Dangerous combinations: credential access + network access (exfiltration chains)
+- Dangerous combinations: file write + shell execution (persistent execution)
+
 ### OWASP Agentic Top 10 Mapping
 Every finding is mapped to the [OWASP Top 10 for Agentic Applications (2026)](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/):
 - **ASI01** — Agent Goal Hijacking (tool poisoning, prompt injection)
-- **ASI02** — Unsafe Tool Use (critical/high-risk tools)
-- **ASI03** — Supply Chain Risk (typosquatting, env exposure, vulnerable packages)
+- **ASI02** — Unsafe Tool Use (critical/high-risk tools, input sanitization, permission scope)
+- **ASI03** — Supply Chain Risk (typosquatting, env exposure, vulnerable packages, transport security)
 - **ASI05** — Cascading Failures (forced tool chaining)
 
 ## Example Output
@@ -127,7 +150,7 @@ SARIF output plugs directly into GitHub Code Scanning. All findings include OWAS
 ## Library
 
 ```javascript
-import { scan, toSarif, classifyTool, detectPoisoning, analyzeServerCommand } from 'decoy-scan';
+import { scan, toSarif, classifyTool, detectPoisoning, analyzeServerCommand, analyzeTransport, analyzeInputSanitization, analyzePermissionScope } from 'decoy-scan';
 
 const results = await scan();
 console.log(results.summary);
@@ -148,6 +171,9 @@ console.log(results.owasp);
 | Tool poisoning detection | **37 patterns, 20 categories** | Yes (LLM-based) | Yes (LLM-based) |
 | Server command analysis | Yes | No | No |
 | Env exposure detection | Yes | No | No |
+| SSE transport security | Yes | No | No |
+| Input sanitization validation | Yes | No | No |
+| Permission scope analysis | Yes | No | No |
 | OWASP mapping | Yes (ASI01-05) | No | No |
 | Advisory database | Yes (Decoy) | No | Yes (Cisco AI Defense) |
 | SARIF output | Yes | No | No |
@@ -165,7 +191,7 @@ console.log(results.owasp);
 
 ## Related
 
-- [decoy-mcp](https://npmjs.com/package/decoy-mcp) — Honeypot MCP tools that detect prompt injection attacks in real time
+- [decoy-mcp](https://npmjs.com/package/decoy-mcp) — Tripwire MCP tools that detect prompt injection attacks in real time
 - [OWASP Top 10 for Agentic Applications](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/)
 - [Decoy threat intelligence](https://app.decoy.run/monitor/stats) — Public threat feed for AI agent security
 

@@ -32,7 +32,7 @@ const RISK_COLORS = { critical: RED, high: ORANGE, medium: YELLOW, low: DIM };
 const RISK_ICONS = { critical: "■", high: "▲", medium: "●", low: "○" };
 
 if (versionMode) {
-  console.log("decoy-scan 0.1.0");
+  console.log("decoy-scan 0.2.0");
   process.exit(0);
 }
 
