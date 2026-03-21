@@ -4,6 +4,9 @@ Security scanner for MCP server configurations. Like `npm audit`, but for your A
 
 Scans Claude Desktop, Cursor, Windsurf, VS Code, Claude Code, Zed, and Cline. Finds risky tools, detects tool poisoning, validates input sanitization, checks SSE transport security, scores permission scope, and maps everything to the OWASP Agentic Top 10. No account required.
 
+<!-- Demo: npx decoy-scan output -->
+![decoy-scan demo](https://res.cloudinary.com/dohqjvu9k/image/upload/v1/decoy-scan-demo.gif)
+
 ## Quick Start
 
 ```bash
