@@ -120,6 +120,8 @@ decoy-scan — MCP Supply Chain Security Scanner
 
 ```bash
 npx decoy-scan                  # Full scan with server probing
+npx decoy-scan --report         # Upload results to Decoy dashboard
+npx decoy-scan --token=TOKEN    # API token (or set DECOY_TOKEN env var)
 npx decoy-scan --no-probe       # Config-only (don't spawn servers)
 npx decoy-scan --no-advisories  # Skip advisory database check
 npx decoy-scan --verbose        # Show all tools including low-risk

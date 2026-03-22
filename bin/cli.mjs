@@ -17,6 +17,8 @@ const noAdvisories = args.includes("--no-advisories");
 const helpMode = args.includes("--help") || args.includes("-h");
 const versionMode = args.includes("--version") || args.includes("-V");
 const verboseMode = args.includes("--verbose") || args.includes("-v");
+const reportMode = args.includes("--report");
+const tokenArg = args.find(a => a.startsWith("--token="))?.split("=")[1] || process.env.DECOY_TOKEN;
 
 const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
@@ -32,7 +34,7 @@ const RISK_COLORS = { critical: RED, high: ORANGE, medium: YELLOW, low: DIM };
 const RISK_ICONS = { critical: "■", high: "▲", medium: "●", low: "○" };
 
 if (versionMode) {
-  console.log("decoy-scan 0.2.0");
+  console.log("decoy-scan 0.3.0");
   process.exit(0);
 }
 
@@ -47,6 +49,8 @@ ${BOLD}Usage:${RESET}
   npx decoy-scan --json         JSON output
   npx decoy-scan --sarif        SARIF output (for GitHub Security, VS Code)
   npx decoy-scan --verbose      Show all tools including low-risk
+  npx decoy-scan --report       Upload results to Decoy dashboard
+  npx decoy-scan --token=TOKEN  API token (or set DECOY_TOKEN env var)
 
 ${BOLD}What it scans:${RESET}
   Claude Desktop, Cursor, Windsurf, VS Code, Claude Code, Zed, Cline
@@ -196,7 +200,34 @@ async function main() {
   if (results.advisories.length > 0) console.log(`  ${RED}${results.advisories.length} advisory match${results.advisories.length !== 1 ? "es" : ""}${RESET}`);
 
   const exit = s.critical > 0 || s.poisoned > 0 ? 2 : s.high > 0 ? 1 : 0;
-  console.log(`\n  ${exit === 0 ? GREEN + "✓ No critical issues" : RED + "✗ Issues found"}${RESET}\n`);
+  console.log(`\n  ${exit === 0 ? GREEN + "✓ No critical issues" : RED + "✗ Issues found"}${RESET}`);
+
+  // Upload results to dashboard
+  if (reportMode) {
+    if (!tokenArg) {
+      console.log(`\n  ${RED}--report requires a token. Use --token=YOUR_TOKEN or set DECOY_TOKEN.${RESET}\n`);
+      process.exit(1);
+    }
+    try {
+      const resp = await fetch("https://app.decoy.run/api/scan/upload?token=" + tokenArg, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ results }),
+      });
+      const data = await resp.json();
+      if (data.ok) {
+        console.log(`\n  ${GREEN}✓ Results uploaded${RESET} ${DIM}(score: ${data.score}/100)${RESET}`);
+        console.log(`  ${DIM}${data.dashboardUrl}${RESET}\n`);
+      } else {
+        console.log(`\n  ${RED}Upload failed: ${data.error}${RESET}\n`);
+      }
+    } catch (e) {
+      console.log(`\n  ${RED}Upload failed: ${e.message}${RESET}\n`);
+    }
+  } else {
+    console.log("");
+  }
+
   process.exit(exit);
 }
 
