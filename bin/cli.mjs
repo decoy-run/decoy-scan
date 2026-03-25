@@ -26,6 +26,8 @@ const versionMode = args.includes("--version") || args.includes("-V");
 const verboseMode = args.includes("--verbose") || args.includes("-v");
 const quietMode = args.includes("--quiet") || args.includes("-q");
 const reportMode = args.includes("--report");
+const shareMode = args.includes("--share");
+const fixMode = args.includes("--fix");
 const skillsMode = args.includes("--skills");
 const policyArg = args.find(a => a.startsWith("--policy="))?.split("=")[1];
 const tokenArg = args.find(a => a.startsWith("--token="))?.split("=")[1] || process.env.DECOY_TOKEN;
@@ -483,6 +485,65 @@ async function main() {
     } else {
       status("");
       status(`  ${c.green}✓${c.reset} All policies passed`);
+    }
+  }
+
+  // --share: upload results and get a shareable public URL
+  if (shareMode) {
+    const sp = spinner("Generating shareable report…");
+    try {
+      const payload = {
+        results: { ...results, tool: "decoy-scan", version: VERSION },
+        timestamp: results.timestamp,
+      };
+      const resp = await fetch("https://app.decoy.run/api/share", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const d = await resp.json();
+      sp.stop();
+      if (d.url) {
+        status(`  ${c.green}✓${c.reset} ${c.bold}${d.url}${c.reset}`);
+        status(`  ${c.dim}Share this link — anyone can view the report.${c.reset}`);
+      } else {
+        status(`  ${c.red}Share failed: ${d.error || "unknown error"}${c.reset}`);
+      }
+    } catch (e) {
+      sp.stop();
+      status(`  ${c.red}Share failed: ${e.message}${c.reset}`);
+    }
+  }
+
+  // --fix: generate hardened MCP config
+  if (fixMode) {
+    const fixes = [];
+    for (const server of results.servers) {
+      if (server.decoy || server.error) continue;
+      for (const f of server.findings) {
+        if (f.source === "env-config") {
+          fixes.push({ server: server.name, type: "env", description: `Move ${f.envVar || "secret"} to a vault or .env file instead of MCP config` });
+        }
+        if (f.source === "permission-scope") {
+          fixes.push({ server: server.name, type: "scope", description: `Server "${server.name}" has too many permissions — consider splitting into separate servers` });
+          break;
+        }
+      }
+      const critTools = server.tools.filter(t => t.risk === "critical");
+      if (critTools.length > 0 && !results.servers.some(s => s.decoy)) {
+        fixes.push({ server: server.name, type: "tripwire", description: `Install tripwires to detect attacks: npx decoy-mcp init` });
+      }
+    }
+
+    if (fixes.length > 0) {
+      status("");
+      status(`  ${c.bold}Fixes (${fixes.length}):${c.reset}`);
+      for (const fix of fixes) {
+        status(`  ${c.green}→${c.reset} ${c.dim}[${fix.server}]${c.reset} ${fix.description}`);
+      }
+    } else {
+      status("");
+      status(`  ${c.green}✓${c.reset} No fixes needed`);
     }
   }
 

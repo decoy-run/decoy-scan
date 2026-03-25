@@ -7,13 +7,54 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [18, 20, 22]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-      - name: Verify module loads
+          node-version: ${{ matrix.node }}
+
+      - name: Module loads
         run: node -e "import('./index.mjs')"
-      - name: Verify CLI
+
+      - name: CLI --version
+        run: node bin/cli.mjs --version
+
+      - name: CLI --help
         run: node bin/cli.mjs --help
+
+      - name: CLI --json (no servers)
+        run: node bin/cli.mjs --json --no-advisories --no-probe
+        shell: bash
+        env:
+          HOME: /tmp/ci-empty
+          USERPROFILE: C:\ci-empty
+
+      - name: CLI --sarif (no servers)
+        run: node bin/cli.mjs --sarif --no-advisories --no-probe
+        shell: bash
+        env:
+          HOME: /tmp/ci-empty
+          USERPROFILE: C:\ci-empty
+
+      - name: CLI --no-color
+        run: node bin/cli.mjs --no-color --no-advisories --no-probe
+        shell: bash
+        env:
+          HOME: /tmp/ci-empty
+          USERPROFILE: C:\ci-empty
+
+      - name: CLI --quiet exits cleanly
+        run: node bin/cli.mjs --quiet --no-advisories --no-probe
+        shell: bash
+        env:
+          HOME: /tmp/ci-empty
+          USERPROFILE: C:\ci-empty
+
+      - name: Run test suite
+        if: matrix.node >= 21
+        run: npm test
