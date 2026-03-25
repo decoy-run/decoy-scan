@@ -2,9 +2,10 @@
 // Scans your MCP server configurations for risky tools, vulnerable packages, and suspicious servers.
 
 import { spawn } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, platform } from "node:os";
+import { createHash } from "node:crypto";
 
 // ─── Risk Classification ───
 
@@ -84,7 +85,10 @@ const POISONING_PATTERNS = [
 
   // Tool chaining / shadowing
   { pattern: /\b(before|after)\s+(calling|using|executing)\s+this\s+tool.*\b(call|use|execute|invoke)\b/i, type: "tool-chaining", severity: "high", description: "Forces agent to call other tools" },
-  { pattern: /\b(call|invoke|use|execute)\s+(the\s+)?['"`]?\w+['"`]?\s+(tool|function|command)\b/i, type: "cross-tool-reference", severity: "high", description: "References other tools by name (potential shadowing)" },
+  // Cross-tool reference: only flag when it looks like injection (quoted tool names, imperative instructions to call other tools).
+  // "Use this tool when..." is normal. "Call the 'admin_tool' tool first" is suspicious.
+  { pattern: /\b(call|invoke|execute)\s+(the\s+)?['"`]\w+['"`]\s+(tool|function|command)\b/i, type: "cross-tool-reference", severity: "high", description: "References other tools by name (potential shadowing)" },
+  { pattern: /\b(must|should|need\s+to)\s+(also\s+)?(call|invoke|use|execute)\s+(the\s+)?\w+\s+tool\b/i, type: "cross-tool-reference", severity: "high", description: "Instructs agent to call another tool" },
   { pattern: /\bshadow\b.*\btrusted\b.*\btool\b/i, type: "tool-shadowing", severity: "critical", description: "Explicitly references tool shadowing technique" },
 
   // Data exfiltration in descriptions
@@ -150,8 +154,10 @@ export function analyzeServerCommand(entry) {
   const full = `${cmd} ${args}`;
   const findings = [];
 
-  // Running from temp/untrusted directories
-  if (/\/(tmp|temp|var\/tmp|dev\/shm)\//i.test(full)) {
+  // Running from temp/untrusted directories.
+  // npx uses temp dirs for its cache — that's normal. Only flag direct temp paths.
+  const isNpx = /\bnpx\b/.test(cmd);
+  if (!isNpx && /\/(tmp|temp|var\/tmp|dev\/shm)\//i.test(full)) {
     findings.push({ type: "temp-directory", severity: "high", description: "Server runs from temporary directory" });
   }
 
@@ -512,6 +518,244 @@ export function analyzePermissionScope(tools) {
   return findings;
 }
 
+// ─── Tool Manifest Hashing ───
+
+export function hashToolManifest(tools) {
+  const canonical = tools
+    .map(t => ({ name: t.name, description: t.description, schema: t.inputSchema }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex").slice(0, 16);
+}
+
+export function detectManifestChanges(currentTools, previousTools) {
+  const findings = [];
+  const prevMap = new Map((previousTools || []).map(t => [t.name, t]));
+  const currMap = new Map((currentTools || []).map(t => [t.name, t]));
+
+  for (const [name] of currMap) {
+    if (!prevMap.has(name)) {
+      findings.push({ type: "manifest-new-tool", severity: "medium", description: `New tool "${name}" added since last scan` });
+    }
+  }
+  for (const [name] of prevMap) {
+    if (!currMap.has(name)) {
+      findings.push({ type: "manifest-removed-tool", severity: "high", description: `Tool "${name}" removed since last scan` });
+    }
+  }
+  for (const [name, curr] of currMap) {
+    const prev = prevMap.get(name);
+    if (prev && curr.description !== prev.description) {
+      findings.push({ type: "manifest-description-changed", severity: "high", description: `Tool "${name}" description changed since last scan` });
+    }
+  }
+  return findings;
+}
+
+// ─── Toxic Flow Detection ───
+// Classifies tools into roles and detects dangerous cross-server combinations.
+
+const TOOL_ROLE_PATTERNS = {
+  untrusted_content: {
+    names: [/fetch/i, /browse/i, /scrape/i, /web.?search/i, /read.?url/i, /http.?get/i, /crawl/i, /rss/i, /navigate/i, /screenshot/i],
+    desc: /\b(fetch|browse|scrape|crawl|web.*search|read.*url|navigate|screenshot|rss)\b/i,
+  },
+  private_data: {
+    names: [/^read.?file/i, /^get.?file/i, /^cat$/i, /database.?query/i, /^sql/i, /access.?credential/i, /get.?env/i, /list.?dir/i, /search.?file/i, /keychain/i, /get.?secret/i],
+    desc: /\b(read.*file|database|query.*sql|credential|secret|password|env.*var|keychain|list.*dir|search.*file)\b/i,
+  },
+  public_sink: {
+    names: [/^http.?request/i, /^send.?email/i, /^upload/i, /^webhook/i, /^slack/i, /^discord/i, /^publish/i, /^deploy/i],
+    desc: /\b(send|upload|transmit|post.*to|publish|deploy|email|slack|discord|webhook)\b/i,
+  },
+  destructive: {
+    names: [/^execute/i, /^run.?command/i, /^shell/i, /^bash/i, /^write.?file/i, /^delete/i, /^remove/i, /^modify.?dns/i, /^make.?payment/i, /^drop/i, /^install.?package/i, /^truncate/i],
+    desc: /\b(execute.*command|shell|write.*file|delete|remove|drop.*table|truncate|install.*package|payment|modify.*dns)\b/i,
+  },
+};
+
+function classifyToolRoles(tool) {
+  const roles = new Set();
+  const name = tool.name || "";
+  const desc = tool.description || "";
+
+  for (const [role, patterns] of Object.entries(TOOL_ROLE_PATTERNS)) {
+    for (const p of patterns.names) {
+      if (p.test(name)) { roles.add(role); break; }
+    }
+    if (patterns.desc.test(desc)) roles.add(role);
+  }
+  return [...roles];
+}
+
+export function analyzeToxicFlows(allTools) {
+  const findings = [];
+  const roleMap = { untrusted_content: [], private_data: [], public_sink: [], destructive: [] };
+
+  for (const tool of allTools) {
+    for (const role of classifyToolRoles(tool)) {
+      if (!roleMap[role].includes(tool.name)) roleMap[role].push(tool.name);
+    }
+  }
+
+  // TF001: Data Leak — untrusted content can reach private data and exfiltrate via public sink
+  if (roleMap.untrusted_content.length > 0 && roleMap.private_data.length > 0 && roleMap.public_sink.length > 0) {
+    findings.push({
+      type: "toxic-flow-data-leak",
+      severity: "critical",
+      id: "TF001",
+      description: "Data leak: untrusted content can reach private data and exfiltrate via public sink",
+      roles: { untrusted_content: roleMap.untrusted_content, private_data: roleMap.private_data, public_sink: roleMap.public_sink },
+    });
+  }
+
+  // TF002: Destructive — untrusted content can trigger irreversible operations
+  if (roleMap.untrusted_content.length > 0 && roleMap.destructive.length > 0) {
+    findings.push({
+      type: "toxic-flow-destructive",
+      severity: "critical",
+      id: "TF002",
+      description: "Destructive flow: untrusted content can trigger irreversible operations",
+      roles: { untrusted_content: roleMap.untrusted_content, destructive: roleMap.destructive },
+    });
+  }
+
+  return findings;
+}
+
+// ─── Skill Scanning ───
+
+function parseSkillFrontmatter(content) {
+  const frontmatter = {};
+  let body = content;
+
+  const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/);
+  if (match) {
+    body = match[2];
+    for (const line of match[1].split("\n")) {
+      const kv = line.match(/^(\S[^:]*?):\s*(.*)$/);
+      if (kv) {
+        let [, key, value] = kv;
+        value = value.trim();
+        if (value.startsWith("[") && value.endsWith("]")) {
+          try { value = JSON.parse(value); } catch {}
+        } else if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+          value = value.slice(1, -1);
+        }
+        frontmatter[key] = value;
+      }
+    }
+  }
+  return { frontmatter, body };
+}
+
+function findSkillFiles(dirPath, source, skills) {
+  try {
+    const entries = readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        findSkillFiles(fullPath, source, skills);
+      } else if (entry.name.endsWith(".md") && !["README.md", "LICENSE.md", "CHANGELOG.md", "CONTRIBUTING.md", "AGENTS.md"].includes(entry.name)) {
+        let type = "unknown";
+        if (entry.name === "SKILL.md") type = "skill";
+        else if (fullPath.includes("/commands/")) type = "command";
+        else if (fullPath.includes("/agents/")) type = "agent";
+        else continue;
+
+        try {
+          const content = readFileSync(fullPath, "utf8");
+          const parsed = parseSkillFrontmatter(content);
+          skills.push({
+            name: parsed.frontmatter.name || parsed.frontmatter.description?.slice(0, 40) || entry.name.replace(".md", ""),
+            path: fullPath,
+            source,
+            type,
+            content,
+            frontmatter: parsed.frontmatter,
+            body: parsed.body,
+          });
+        } catch {}
+      }
+    }
+  } catch {}
+}
+
+export function discoverSkills() {
+  const skills = [];
+  const home = homedir();
+
+  const officialCache = join(home, ".claude", "plugins", "cache", "claude-plugins-official");
+  const marketplace = join(home, ".claude", "plugins", "marketplaces", "claude-code-plugins", "plugins");
+  const projectCommands = join(process.cwd(), ".claude", "commands");
+
+  if (existsSync(officialCache)) findSkillFiles(officialCache, "official", skills);
+  if (existsSync(marketplace)) findSkillFiles(marketplace, "marketplace", skills);
+  if (existsSync(projectCommands)) findSkillFiles(projectCommands, "project", skills);
+
+  return skills;
+}
+
+const SKILL_SECRET_PATTERNS = [
+  { pattern: /\b(sk-[a-zA-Z0-9]{20,})\b/, type: "skill-hardcoded-api-key", description: "Contains hardcoded OpenAI API key" },
+  { pattern: /\b(ghp_[a-zA-Z0-9]{36,})\b/, type: "skill-hardcoded-token", description: "Contains hardcoded GitHub token" },
+  { pattern: /\b(AKIA[A-Z0-9]{16})\b/, type: "skill-hardcoded-aws-key", description: "Contains hardcoded AWS access key" },
+  { pattern: /\b(xox[bprs]-[a-zA-Z0-9-]+)\b/, type: "skill-hardcoded-slack-token", description: "Contains hardcoded Slack token" },
+  { pattern: /password\s*[:=]\s*["'][^"']{8,}["']/i, type: "skill-hardcoded-password", description: "Contains hardcoded password" },
+  { pattern: /\bBearer\s+[a-zA-Z0-9._-]{20,}\b/, type: "skill-hardcoded-bearer", description: "Contains hardcoded Bearer token" },
+];
+
+export function analyzeSkill(skill) {
+  const findings = [];
+  const body = skill.body || "";
+  const fm = skill.frontmatter || {};
+
+  // Prompt injection (reuse existing poisoning patterns on skill body)
+  for (const { pattern, type, severity, description } of POISONING_PATTERNS) {
+    if (pattern.test(body)) {
+      findings.push({ type: "skill-" + type, severity, description: `Skill: ${description}` });
+    }
+  }
+
+  // Hardcoded secrets
+  for (const { pattern, type, description } of SKILL_SECRET_PATTERNS) {
+    if (pattern.test(skill.content)) {
+      findings.push({ type, severity: "critical", description });
+    }
+  }
+
+  // Suspicious URLs
+  const urls = skill.content.match(/https?:\/\/[^\s)"'>]+/gi) || [];
+  const trustedHosts = /github\.com|githubusercontent\.com|npmjs\.com|anthropic\.com|claude\.ai|decoy\.run|owasp\.org|localhost|127\.0\.0\.1/i;
+  for (const url of urls) {
+    try {
+      const host = new URL(url).hostname;
+      if (!trustedHosts.test(host)) {
+        findings.push({ type: "skill-suspicious-url", severity: "medium", description: `References external URL: ${url.slice(0, 100)}` });
+        break;
+      }
+    } catch {}
+  }
+
+  // Overly broad tool access
+  const allowedTools = fm["allowed-tools"] || fm.tools;
+  if (allowedTools) {
+    const toolList = Array.isArray(allowedTools) ? allowedTools : String(allowedTools).split(",").map(t => t.trim());
+    if (toolList.includes("*")) {
+      findings.push({ type: "skill-wildcard-tools", severity: "high", description: "Skill has wildcard tool access" });
+    }
+    if (toolList.some(t => t === "Bash" || /^Bash\(\*\)$/.test(t))) {
+      findings.push({ type: "skill-unrestricted-bash", severity: "high", description: "Skill has unrestricted Bash access" });
+    }
+  }
+
+  // Instructions to expose credentials
+  if (/\b(include|output|print|display|show|return)\b.*\b(api.?key|token|secret|password|credential)/i.test(body)) {
+    findings.push({ type: "skill-credential-output", severity: "high", description: "Skill instructs including credentials in output" });
+  }
+
+  return findings;
+}
+
 // ─── OWASP Agentic Top 10 Mapping ───
 
 const OWASP_MAP = {
@@ -564,10 +808,34 @@ const OWASP_MAP = {
   // Permission scope (ASI02)
   "scope-overprivileged": { id: "ASI02", name: "Unsafe Tool Use", description: "Server has excessive capability scope" },
   "scope-dangerous-combo": { id: "ASI02", name: "Unsafe Tool Use", description: "Server has dangerous capability combination" },
+  // Manifest changes (ASI03)
+  "manifest-new-tool": { id: "ASI03", name: "Supply Chain Risk", description: "New tool appeared in server manifest" },
+  "manifest-removed-tool": { id: "ASI03", name: "Supply Chain Risk", description: "Tool removed from server manifest" },
+  "manifest-description-changed": { id: "ASI01", name: "Agent Goal Hijacking", description: "Tool description changed" },
+  // Toxic flows (ASI02)
+  "toxic-flow-data-leak": { id: "ASI02", name: "Unsafe Tool Use", description: "Cross-server data leak flow" },
+  "toxic-flow-destructive": { id: "ASI02", name: "Unsafe Tool Use", description: "Cross-server destructive flow" },
+  // Skill issues
+  "skill-hardcoded-api-key": { id: "ASI03", name: "Supply Chain Risk", description: "Skill contains hardcoded API key" },
+  "skill-hardcoded-token": { id: "ASI03", name: "Supply Chain Risk", description: "Skill contains hardcoded token" },
+  "skill-hardcoded-aws-key": { id: "ASI03", name: "Supply Chain Risk", description: "Skill contains hardcoded AWS key" },
+  "skill-hardcoded-slack-token": { id: "ASI03", name: "Supply Chain Risk", description: "Skill contains hardcoded Slack token" },
+  "skill-hardcoded-password": { id: "ASI03", name: "Supply Chain Risk", description: "Skill contains hardcoded password" },
+  "skill-hardcoded-bearer": { id: "ASI03", name: "Supply Chain Risk", description: "Skill contains hardcoded Bearer token" },
+  "skill-suspicious-url": { id: "ASI03", name: "Supply Chain Risk", description: "Skill references suspicious URL" },
+  "skill-wildcard-tools": { id: "ASI02", name: "Unsafe Tool Use", description: "Skill has unrestricted tool access" },
+  "skill-unrestricted-bash": { id: "ASI02", name: "Unsafe Tool Use", description: "Skill has unrestricted Bash access" },
+  "skill-credential-output": { id: "ASI02", name: "Unsafe Tool Use", description: "Skill exposes credentials in output" },
 };
 
 export function mapToOwasp(findingType) {
-  return OWASP_MAP[findingType] || null;
+  if (OWASP_MAP[findingType]) return OWASP_MAP[findingType];
+  // Skill findings inherit OWASP mapping from base poisoning type
+  if (findingType.startsWith("skill-")) {
+    const base = findingType.slice(6);
+    if (OWASP_MAP[base]) return OWASP_MAP[base];
+  }
+  return null;
 }
 
 // ─── Host Config Discovery ───
@@ -659,6 +927,7 @@ export function probeServer(name, entry, env = {}) {
     }
 
     let stdout = "";
+    let stderrBuf = "";
     let resolved = false;
     let initDone = false;
 
@@ -670,6 +939,11 @@ export function probeServer(name, entry, env = {}) {
     };
 
     const timer = setTimeout(() => finish({ name, error: "Timeout (15s)", tools: [] }), timeout);
+
+    proc.stderr?.on("data", (chunk) => {
+      stderrBuf += chunk.toString();
+      if (stderrBuf.length > 2048) stderrBuf = stderrBuf.slice(-2048);
+    });
 
     proc.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
@@ -709,7 +983,11 @@ export function probeServer(name, entry, env = {}) {
 
     proc.on("exit", (code) => {
       clearTimeout(timer);
-      if (!resolved) finish({ name, error: `Exited with code ${code}`, tools: [] });
+      if (!resolved) {
+        const hint = stderrBuf.trim().split("\n").pop()?.slice(0, 200) || "";
+        const msg = hint ? `Exited with code ${code}: ${hint}` : `Exited with code ${code}`;
+        finish({ name, error: msg, tools: [] });
+      }
     });
 
     // Send MCP initialize
@@ -757,16 +1035,25 @@ export function matchAdvisories(serverEntry, advisories) {
 
 // ─── Full Scan ───
 
-export async function scan({ probe = true, advisories = true } = {}) {
+export async function scan({ probe = true, advisories = true, skills = false } = {}) {
   const configs = discoverConfigs();
   const results = {
     timestamp: new Date().toISOString(),
     hosts: configs.map(c => c.host),
     servers: [],
-    summary: { total: 0, critical: 0, high: 0, medium: 0, low: 0, errors: 0, poisoned: 0, suspicious: 0, envExposures: 0, readiness: 0, transportIssues: 0, sanitizationIssues: 0, scopeIssues: 0 },
+    summary: { total: 0, critical: 0, high: 0, medium: 0, low: 0, errors: 0, poisoned: 0, suspicious: 0, envExposures: 0, readiness: 0, transportIssues: 0, sanitizationIssues: 0, scopeIssues: 0, manifestChanges: 0, toxicFlows: 0, skillIssues: 0 },
     advisories: [],
+    toxicFlows: [],
+    skills: [],
     owasp: {},
   };
+
+  // Load previous scan for manifest change detection
+  let previousScan = null;
+  try {
+    const cachePath = join(homedir(), ".decoy", "scan.json");
+    if (existsSync(cachePath)) previousScan = JSON.parse(readFileSync(cachePath, "utf8"));
+  } catch {}
 
   // Deduplicate servers across hosts
   const serverMap = new Map();
@@ -813,6 +1100,10 @@ export async function scan({ probe = true, advisories = true } = {}) {
       results.summary.errors++;
     }
 
+    // Detect decoy tripwire server (don't flag our own product as a threat)
+    const isDecoy = name === "system-tools" && !!entry.env?.DECOY_TOKEN;
+    if (isDecoy) server.decoy = true;
+
     // Classify tools
     server.tools = probeResult.tools.map(t => {
       const risk = classifyTool(t);
@@ -824,6 +1115,14 @@ export async function scan({ probe = true, advisories = true } = {}) {
         poisoning: poisoning.length > 0 ? poisoning : undefined,
       };
     });
+
+    // Decoy servers: keep tools for reference but skip all analysis.
+    // They're intentionally dangerous-looking — that's the point.
+    if (isDecoy) {
+      server.risk = "info";
+      results.servers.push(server);
+      continue;
+    }
 
     // Tool poisoning findings
     for (const tool of server.tools) {
@@ -891,6 +1190,22 @@ export async function scan({ probe = true, advisories = true } = {}) {
       results.summary.scopeIssues++;
     }
 
+    // Manifest hashing + change detection
+    if (probeResult.tools.length > 0) {
+      server.manifestHash = hashToolManifest(probeResult.tools);
+      if (previousScan) {
+        const prevServer = previousScan.servers?.find(s => s.name === name);
+        if (prevServer?.tools?.length > 0) {
+          server.previousManifestHash = prevServer.manifestHash;
+          const manifestFindings = detectManifestChanges(probeResult.tools, prevServer.tools);
+          for (const f of manifestFindings) {
+            server.findings.push({ ...f, source: "manifest-change" });
+            results.summary.manifestChanges++;
+          }
+        }
+      }
+    }
+
     // Classify server risk = worst across tools + findings
     const toolRisks = server.tools.map(t => t.risk);
     const findingRisks = server.findings.map(f => f.severity);
@@ -921,6 +1236,41 @@ export async function scan({ probe = true, advisories = true } = {}) {
     results.summary.total++;
     results.summary[server.risk]++;
     results.servers.push(server);
+  }
+
+  // Toxic flow analysis across all non-decoy servers
+  const allNonDecoyTools = [];
+  for (let i = 0; i < serverOrder.length; i++) {
+    const { name, entry } = serverOrder[i];
+    const isDecoy = name === "system-tools" && !!entry.env?.DECOY_TOKEN;
+    if (isDecoy || probeResults[i].error) continue;
+    for (const tool of probeResults[i].tools) allNonDecoyTools.push(tool);
+  }
+  results.toxicFlows = analyzeToxicFlows(allNonDecoyTools);
+  results.summary.toxicFlows = results.toxicFlows.length;
+  for (const f of results.toxicFlows) {
+    const owasp = mapToOwasp(f.type);
+    if (owasp) {
+      if (!results.owasp[owasp.id]) results.owasp[owasp.id] = { ...owasp, count: 0 };
+      results.owasp[owasp.id].count++;
+    }
+  }
+
+  // Skill scanning
+  if (skills) {
+    const discovered = discoverSkills();
+    for (const skill of discovered) {
+      const skillFindings = analyzeSkill(skill);
+      results.skills.push({ name: skill.name, path: skill.path, source: skill.source, type: skill.type, findings: skillFindings });
+      results.summary.skillIssues += skillFindings.length;
+      for (const f of skillFindings) {
+        const owasp = mapToOwasp(f.type);
+        if (owasp) {
+          if (!results.owasp[owasp.id]) results.owasp[owasp.id] = { ...owasp, count: 0 };
+          results.owasp[owasp.id].count++;
+        }
+      }
+    }
   }
 
   // Check advisories

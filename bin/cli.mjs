@@ -1,13 +1,20 @@
 #!/usr/bin/env node
 
-// decoy-scan CLI — scan MCP server configs for security risks
-// Usage:
-//   npx decoy-scan              — scan all MCP configs
-//   npx decoy-scan --no-probe   — skip server probing (config-only)
-//   npx decoy-scan --sarif      — SARIF output for CI/CD
-//   npx decoy-scan --json       — JSON output
+// decoy-scan CLI — MCP supply chain security scanner
 
 import { scan, toSarif, discoverConfigs } from "../index.mjs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
+
+// ─── Version ───
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PKG = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8"));
+const VERSION = PKG.version;
+
+// ─── Args ───
 
 const args = process.argv.slice(2);
 const jsonMode = args.includes("--json");
@@ -17,221 +24,486 @@ const noAdvisories = args.includes("--no-advisories");
 const helpMode = args.includes("--help") || args.includes("-h");
 const versionMode = args.includes("--version") || args.includes("-V");
 const verboseMode = args.includes("--verbose") || args.includes("-v");
+const quietMode = args.includes("--quiet") || args.includes("-q");
 const reportMode = args.includes("--report");
+const skillsMode = args.includes("--skills");
+const policyArg = args.find(a => a.startsWith("--policy="))?.split("=")[1];
 const tokenArg = args.find(a => a.startsWith("--token="))?.split("=")[1] || process.env.DECOY_TOKEN;
 
-const BOLD = "\x1b[1m";
-const DIM = "\x1b[2m";
-const RED = "\x1b[31m";
-const GREEN = "\x1b[32m";
-const YELLOW = "\x1b[33m";
-const ORANGE = "\x1b[38;5;208m";
-const CYAN = "\x1b[36m";
-const MAGENTA = "\x1b[35m";
-const RESET = "\x1b[0m";
+// ─── Color support ───
 
-const RISK_COLORS = { critical: RED, high: ORANGE, medium: YELLOW, low: DIM };
-const RISK_ICONS = { critical: "■", high: "▲", medium: "●", low: "○" };
+const isTTY = process.stderr.isTTY;
+const noColor = args.includes("--no-color") ||
+  "NO_COLOR" in process.env ||
+  process.env.TERM === "dumb" ||
+  (!isTTY && !process.env.FORCE_COLOR);
+
+const c = noColor
+  ? { bold: "", dim: "", red: "", green: "", yellow: "", orange: "", cyan: "", magenta: "", reset: "" }
+  : {
+    bold: "\x1b[1m",
+    dim: "\x1b[2m",
+    red: "\x1b[31m",
+    green: "\x1b[32m",
+    yellow: "\x1b[33m",
+    orange: "\x1b[38;5;208m",
+    cyan: "\x1b[36m",
+    magenta: "\x1b[35m",
+    reset: "\x1b[0m",
+  };
+
+// 3-tier color: red (act now), yellow (warning), default (info).
+const RISK_COLORS = { critical: c.red, high: c.red, medium: c.yellow, low: "" };
+const RISK_ICONS = { critical: "✗", high: "!", medium: "~", low: " " };
+
+// ─── Output helpers ───
+
+function status(msg) {
+  if (!quietMode) process.stderr.write(msg + "\n");
+}
+
+function data(msg) {
+  process.stdout.write(msg + "\n");
+}
+
+// ─── Spinner ───
+
+function spinner(label) {
+  if (!isTTY || quietMode) return { stop() {} };
+  const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  let i = 0;
+  const id = setInterval(() => {
+    process.stderr.write(`\r  ${c.dim}${frames[i++ % frames.length]} ${label}${c.reset}`);
+  }, 80);
+  return {
+    stop(finalMsg) {
+      clearInterval(id);
+      process.stderr.write("\r" + " ".repeat(label.length + 10) + "\r");
+      if (finalMsg) status(finalMsg);
+    },
+  };
+}
+
+// ─── Version ───
 
 if (versionMode) {
-  console.log("decoy-scan 0.3.0");
+  data(`decoy-scan ${VERSION}`);
   process.exit(0);
 }
 
+// ─── Help ───
+
 if (helpMode) {
-  console.log(`
-${BOLD}decoy-scan${RESET} — MCP Supply Chain Security Scanner
+  data(`${c.bold}decoy-scan${c.reset}
+Find security risks in your MCP servers before attackers do.
 
-${BOLD}Usage:${RESET}
-  npx decoy-scan                Scan all MCP server configurations
-  npx decoy-scan --no-probe     Config-only scan (don't spawn servers)
-  npx decoy-scan --no-advisories  Skip advisory database check
-  npx decoy-scan --json         JSON output
-  npx decoy-scan --sarif        SARIF output (for GitHub Security, VS Code)
-  npx decoy-scan --verbose      Show all tools including low-risk
-  npx decoy-scan --report       Upload results to Decoy dashboard
-  npx decoy-scan --token=TOKEN  API token (or set DECOY_TOKEN env var)
+${c.bold}Usage:${c.reset}
+  decoy-scan [flags]
 
-${BOLD}What it scans:${RESET}
-  Claude Desktop, Cursor, Windsurf, VS Code, Claude Code, Zed, Cline
+${c.bold}Examples:${c.reset}
+  decoy-scan                    Scan all MCP server configurations
+  decoy-scan --no-probe         Config-only scan (skip server probing)
+  decoy-scan --json | jq        Pipe structured output to jq
+  decoy-scan --sarif > out.sarif Export for GitHub Security / VS Code
+  decoy-scan --report           Upload results to Decoy dashboard
 
-${BOLD}What it checks:${RESET}
-  • Tool risk classification (critical/high/medium/low)
-  • Tool poisoning detection (prompt injection in descriptions)
-  • Server command analysis (suspicious spawn commands)
-  • Environment variable exposure (secrets passed to servers)
-  • Known vulnerable packages (via Decoy advisory database)
-  • OWASP Agentic Top 10 mapping
+${c.bold}Flags:${c.reset}
+      --json              JSON output (stdout, pipeable to jq)
+      --sarif             SARIF 2.1.0 output
+      --no-probe          Config-only scan — don't spawn servers
+      --no-advisories     Skip advisory database lookup
+      --report            Upload results to Decoy dashboard
+      --skills            Scan Claude Code skills for injection and secrets
+      --token string      API token (or set DECOY_TOKEN env var)
+  -v, --verbose           Show all tools including low-risk
+  -q, --quiet             Suppress status output
+      --no-color          Disable colored output
+      --color             Force colored output
+  -V, --version           Show version
+  -h, --help              Show this help
 
-${BOLD}Exit codes:${RESET}
+${c.bold}Exit codes:${c.reset}
   0  No critical or high-risk issues
   1  High-risk issues found
-  2  Critical issues found
+  2  Critical issues or tool poisoning found
 
-${BOLD}Links:${RESET}
-  GitHub: https://github.com/decoy-run/decoy-scan
-  npm:    https://npmjs.com/package/decoy-scan
+${c.bold}What it scans:${c.reset}
+  Claude Desktop, Cursor, Windsurf, VS Code, Claude Code, Zed, Cline
+  Run from your project root to include project-level .mcp.json configs.
+
+${c.bold}What it checks:${c.reset}
+  Tool risk classification    Prompt injection / poisoning detection
+  Server command analysis     Environment variable exposure
+  Supply chain advisories     Transport security (SSE/HTTP)
+  Input sanitization          Permission scope analysis
+  Toxic flow detection        Tool manifest change detection
+  Skill scanning (--skills)   OWASP Agentic Top 10 mapping
 `);
   process.exit(0);
 }
 
+// ─── Main ───
+
 async function main() {
-  if (!jsonMode && !sarifMode) {
-    console.log(`\n${BOLD}decoy-scan${RESET} — MCP Supply Chain Security Scanner\n`);
+  const machineMode = jsonMode || sarifMode;
+
+  if (!machineMode) {
+    status("");
+    status(`  ${c.bold}decoy-scan${c.reset} ${c.dim}v${VERSION}${c.reset}`);
+    status("");
   }
 
-  // Discovery phase
+  // Discovery
   const configs = discoverConfigs();
   if (configs.length === 0) {
     if (jsonMode) {
-      console.log(JSON.stringify({ error: "No MCP configurations found", hosts: [] }));
+      data(JSON.stringify({ error: "No MCP configurations found", hosts: [] }));
     } else if (!sarifMode) {
-      console.log(`  ${YELLOW}No MCP configurations found.${RESET}`);
-      console.log(`  ${DIM}Install an MCP-compatible client (Claude Desktop, Cursor, etc.) first.${RESET}\n`);
+      status(`  ${c.yellow}No MCP configurations found.${c.reset}`);
+      status(`  ${c.dim}Checked: Claude Desktop, Cursor, Windsurf, VS Code, Claude Code, Zed, Cline${c.reset}`);
+      status("");
+      status(`  ${c.dim}Install an MCP-compatible client first, then re-run.${c.reset}`);
     }
     process.exit(0);
   }
 
-  if (!jsonMode && !sarifMode) {
-    console.log(`  ${DIM}Found configs:${RESET} ${configs.map(c => c.host).join(", ")}`);
-    console.log(`  ${DIM}${noProbe ? "Config-only scan (skipping server probes)" : "Probing servers..."}${RESET}\n`);
+  if (!machineMode) {
+    const hostNames = configs.map(h => h.host).join(", ");
+    status(`  ${c.dim}Hosts:${c.reset} ${hostNames}`);
   }
 
-  const results = await scan({ probe: !noProbe, advisories: !noAdvisories });
+  // Scan
+  const sp = !machineMode
+    ? spinner(noProbe ? "Scanning configs…" : "Probing servers…")
+    : { stop() {} };
 
+  const results = await scan({ probe: !noProbe, advisories: !noAdvisories, skills: skillsMode });
+  sp.stop();
+
+  // #4: Explain what --no-probe misses
+  if (noProbe && !machineMode) {
+    status(`  ${c.dim}Config scan only — run without --no-probe to discover tools and get full analysis.${c.reset}`);
+  }
+
+  // Machine output — #3: Add version/tool metadata to JSON
   if (sarifMode) {
-    console.log(JSON.stringify(toSarif(results), null, 2));
+    data(JSON.stringify(toSarif(results), null, 2));
+    writeScanCache(results);
     process.exit(0);
   }
-
   if (jsonMode) {
-    console.log(JSON.stringify(results, null, 2));
+    data(JSON.stringify({ tool: "decoy-scan", version: VERSION, ...results }, null, 2));
+    writeScanCache(results);
     process.exit(0);
   }
 
-  // Pretty print
+  // ─── Pretty output ───
+  status("");
+
+  const hasDecoy = results.servers.some(s => s.decoy);
+  let hasDangerousTools = false;
+
   for (const server of results.servers) {
-    const riskColor = RISK_COLORS[server.risk] || DIM;
-    const icon = RISK_ICONS[server.risk] || "○";
+    // #1: Decoy tripwire server — show as active protection, not a threat
+    if (server.decoy) {
+      status(`  ${c.green}✓${c.reset} ${c.bold}${server.name}${c.reset}  ${c.dim}Tripwires active${c.reset}`);
+      status("");
+      continue;
+    }
+
+    const riskColor = RISK_COLORS[server.risk] || "";
+    const icon = RISK_ICONS[server.risk] || " ";
     const hostStr = server.hosts.join(", ");
 
-    console.log(`  ${riskColor}${icon}${RESET} ${BOLD}${server.name}${RESET}  ${DIM}(${hostStr})${RESET}`);
+    status(`  ${riskColor}${icon}${c.reset} ${c.bold}${server.name}${c.reset}  ${c.dim}${hostStr}${c.reset}`);
 
     if (server.error) {
-      console.log(`    ${RED}Error: ${server.error}${RESET}`);
+      status(`    ${c.red}Error: ${server.error}${c.reset}`);
+      status("");
+      continue;
     }
 
-    // Show findings (poisoning, command issues, env exposure)
-    for (const f of server.findings) {
-      const fc = RISK_COLORS[f.severity] || DIM;
-      const label = f.source === "tool-description" ? "POISONING" :
-                    f.source === "server-command" ? "COMMAND" :
-                    f.source === "env-config" ? "ENV" :
-                    f.source === "tool-count" ? "SURFACE" :
-                    f.source === "readiness" ? "READINESS" :
-                    f.source === "transport" ? "TRANSPORT" :
-                    f.source === "input-sanitization" ? "INPUT" :
-                    f.source === "permission-scope" ? "SCOPE" : "FINDING";
-      console.log(`    ${fc}${label.padEnd(9)}${RESET} ${f.description}${f.tool ? ` ${DIM}(${f.tool})${RESET}` : ""}`);
+    // Tools — the most important thing. What can this server do?
+    const criticalTools = server.tools.filter(t => t.risk === "critical");
+    const highTools = server.tools.filter(t => t.risk === "high");
+    const mediumTools = server.tools.filter(t => t.risk === "medium");
+    const lowTools = server.tools.filter(t => t.risk === "low");
+
+    if (criticalTools.length > 0 || highTools.length > 0) hasDangerousTools = true;
+
+    if (criticalTools.length > 0) {
+      status(`    ${c.red}${criticalTools.map(t => t.name).join(", ")}${c.reset}`);
+    }
+    if (highTools.length > 0) {
+      status(`    ${c.red}${highTools.map(t => t.name).join(", ")}${c.reset}`);
+    }
+    if (mediumTools.length > 0 && verboseMode) {
+      status(`    ${c.yellow}${mediumTools.map(t => t.name).join(", ")}${c.reset}`);
+    }
+    if (verboseMode && lowTools.length > 0) {
+      status(`    ${lowTools.map(t => t.name).join(", ")}`);
     }
 
-    // Show risky tools (skip low unless verbose)
-    const riskyTools = server.tools.filter(t => t.risk !== "low");
-    const lowCount = server.tools.length - riskyTools.length;
-    const toolsToShow = verboseMode ? server.tools : riskyTools;
-
-    for (const tool of toolsToShow) {
-      const tc = RISK_COLORS[tool.risk] || DIM;
-      console.log(`    ${tc}${tool.risk.toUpperCase().padEnd(9)}${RESET}${tool.name}`);
-      if (tool.description && verboseMode) {
-        console.log(`              ${DIM}${tool.description.slice(0, 80)}${RESET}`);
+    // #8: Show medium and low counts separately
+    if (!verboseMode) {
+      const parts = [];
+      if (mediumTools.length > 0) parts.push(`${mediumTools.length} medium`);
+      if (lowTools.length > 0) parts.push(`${lowTools.length} low`);
+      if (parts.length > 0) {
+        status(`    ${c.dim}+ ${parts.join(", ")} risk${c.reset}`);
       }
     }
 
-    if (!verboseMode && lowCount > 0) {
-      console.log(`    ${DIM}+ ${lowCount} low-risk tool${lowCount > 1 ? "s" : ""}${RESET}`);
+    if (server.tools.length === 0) {
+      status(`    ${c.dim}No tools discovered${c.reset}`);
     }
 
-    if (server.tools.length === 0 && !server.error) {
-      console.log(`    ${DIM}No tools discovered${RESET}`);
+    // Findings — collapsed by category with human-readable labels.
+    const findings = server.findings;
+    if (findings.length > 0) {
+      const groups = {};
+      for (const f of findings) {
+        const key = f.source;
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(f);
+      }
+
+      const categoryInfo = {
+        "tool-description":   { label: "Prompt injection detected in tool descriptions", tier: "red" },
+        "server-command":     { label: "Suspicious server spawn command", tier: "red" },
+        "transport":          { label: "Insecure transport (HTTP without TLS)", tier: "red" },
+        "env-config":         { label: "Secrets exposed via environment variables", tier: "yellow" },
+        "tool-count":         { label: "Large attack surface", tier: "yellow" },
+        "permission-scope":   { label: "Server has too many permissions", tier: "yellow" },
+        "readiness":          { label: "Tools missing input constraints or safety checks", tier: "info" },
+        "input-sanitization": { label: "Tools accept unconstrained input", tier: "info" },
+        "manifest-change":    { label: "Tool manifest changed since last scan", tier: "yellow" },
+      };
+
+      const tierColor = { red: c.red, yellow: c.yellow, info: c.dim };
+
+      for (const [source, items] of Object.entries(groups)) {
+        const info = categoryInfo[source] || { label: source, tier: "info" };
+        if (!verboseMode && info.tier === "info") continue;
+
+        const color = tierColor[info.tier] || "";
+        const count = items.length > 1 ? ` ${c.dim}(${items.length})${c.reset}` : "";
+        status(`    ${color}${info.label}${c.reset}${count}`);
+      }
     }
 
-    console.log();
+    status("");
   }
 
   // Advisories
   if (results.advisories.length > 0) {
-    console.log(`  ${RED}${BOLD}Supply Chain Advisories${RESET}\n`);
+    status(`  ${c.red}${c.bold}Supply Chain Advisories${c.reset}`);
+    status("");
     for (const adv of results.advisories) {
-      console.log(`  ${RED}■${RESET} ${BOLD}${adv.title}${RESET}`);
-      console.log(`    Server: ${adv.server}`);
-      if (adv.affectedPackages) console.log(`    Package: ${adv.affectedPackages.join(", ")}`);
-      if (adv.remediation) console.log(`    Fix: ${adv.remediation}`);
-      if (adv.sourceUrl) console.log(`    ${DIM}${adv.sourceUrl}${RESET}`);
-      console.log();
+      status(`  ${c.red}✗${c.reset} ${c.bold}${adv.title}${c.reset}`);
+      status(`    Server: ${adv.server}`);
+      if (adv.affectedPackages) status(`    Package: ${adv.affectedPackages.join(", ")}`);
+      if (adv.remediation) status(`    Fix: ${adv.remediation}`);
+      if (adv.sourceUrl) status(`    ${c.dim}${adv.sourceUrl}${c.reset}`);
+      status("");
     }
   }
 
-  // OWASP mapping
-  const owaspEntries = Object.entries(results.owasp || {});
-  if (owaspEntries.length > 0) {
-    console.log(`  ${MAGENTA}${BOLD}OWASP Agentic Top 10${RESET}\n`);
-    for (const [id, entry] of owaspEntries.sort((a, b) => a[0].localeCompare(b[0]))) {
-      console.log(`  ${MAGENTA}${id}${RESET}  ${entry.name}  ${DIM}(${entry.count} finding${entry.count > 1 ? "s" : ""})${RESET}`);
+  // Toxic flows
+  if (results.toxicFlows?.length > 0) {
+    status(`  ${c.red}${c.bold}Toxic Flows${c.reset}`);
+    status("");
+    for (const flow of results.toxicFlows) {
+      status(`  ${c.red}✗${c.reset} ${c.bold}${flow.id}${c.reset} ${flow.description}`);
+      for (const [role, tools] of Object.entries(flow.roles)) {
+        status(`    ${c.dim}${role.replace(/_/g, " ")}:${c.reset} ${tools.join(", ")}`);
+      }
+      status("");
     }
-    console.log();
   }
 
-  // Summary
+  // Skills
+  if (results.skills?.length > 0) {
+    const skillsWithIssues = results.skills.filter(s => s.findings.length > 0);
+    if (skillsWithIssues.length > 0) {
+      status(`  ${c.red}${c.bold}Skill Issues${c.reset}`);
+      status("");
+      for (const skill of skillsWithIssues) {
+        status(`  ${c.red}!${c.reset} ${c.bold}${skill.name}${c.reset}  ${c.dim}${skill.source}/${skill.type}${c.reset}`);
+        for (const f of skill.findings) {
+          const fc = { critical: c.red, high: c.red, medium: c.yellow }[f.severity] || c.dim;
+          status(`    ${fc}${f.description}${c.reset}`);
+        }
+        status("");
+      }
+    } else if (skillsMode) {
+      status(`  ${c.green}✓${c.reset} ${results.skills.length} skill${results.skills.length !== 1 ? "s" : ""} scanned, no issues`);
+      status("");
+    }
+  }
+
+  // #6: Tool risk legend — show once if dangerous tools exist
+  if (hasDangerousTools) {
+    status(`  ${c.dim}Critical = code exec, file write, payments · High = file read, network, credentials${c.reset}`);
+  }
+
+  // #7: Summary uses tool-level counts, not server-level
+  const toolCounts = { critical: 0, high: 0, medium: 0, low: 0 };
+  for (const srv of results.servers) {
+    if (srv.decoy) continue; // Don't count decoy tools in summary
+    for (const t of srv.tools) toolCounts[t.risk]++;
+  }
+  const totalTools = toolCounts.critical + toolCounts.high + toolCounts.medium + toolCounts.low;
+  const nonDecoyServers = results.servers.filter(s => !s.decoy && !s.error);
+
   const s = results.summary;
-  console.log(`  ${BOLD}Summary${RESET}`);
-  console.log(`  ${s.total} server${s.total !== 1 ? "s" : ""} scanned`);
-  if (s.critical > 0) console.log(`  ${RED}${s.critical} critical${RESET}`);
-  if (s.high > 0) console.log(`  ${ORANGE}${s.high} high${RESET}`);
-  if (s.medium > 0) console.log(`  ${YELLOW}${s.medium} medium${RESET}`);
-  if (s.errors > 0) console.log(`  ${RED}${s.errors} error${s.errors !== 1 ? "s" : ""}${RESET}`);
-  if (s.poisoned > 0) console.log(`  ${RED}${s.poisoned} tool poisoning finding${s.poisoned !== 1 ? "s" : ""}${RESET}`);
-  if (s.suspicious > 0) console.log(`  ${ORANGE}${s.suspicious} suspicious command${s.suspicious !== 1 ? "s" : ""}${RESET}`);
-  if (s.envExposures > 0) console.log(`  ${ORANGE}${s.envExposures} env exposure${s.envExposures !== 1 ? "s" : ""}${RESET}`);
-  if (s.readiness > 0) console.log(`  ${YELLOW}${s.readiness} readiness issue${s.readiness !== 1 ? "s" : ""}${RESET}`);
-  if (s.transportIssues > 0) console.log(`  ${ORANGE}${s.transportIssues} transport issue${s.transportIssues !== 1 ? "s" : ""}${RESET}`);
-  if (s.sanitizationIssues > 0) console.log(`  ${YELLOW}${s.sanitizationIssues} input sanitization issue${s.sanitizationIssues !== 1 ? "s" : ""}${RESET}`);
-  if (s.scopeIssues > 0) console.log(`  ${ORANGE}${s.scopeIssues} permission scope issue${s.scopeIssues !== 1 ? "s" : ""}${RESET}`);
-  if (results.advisories.length > 0) console.log(`  ${RED}${results.advisories.length} advisory match${results.advisories.length !== 1 ? "es" : ""}${RESET}`);
+  // Compute exit from non-decoy tool counts + poisoning
+  const nonDecoyPoisoned = results.servers.filter(srv => !srv.decoy).reduce((n, srv) => n + srv.findings.filter(f => f.source === "tool-description").length, 0);
+  const hasToxicFlows = results.toxicFlows?.length > 0;
+  const hasSkillIssues = results.summary.skillIssues > 0;
+  const exit = toolCounts.critical > 0 || nonDecoyPoisoned > 0 || hasToxicFlows ? 2 : (toolCounts.high > 0 || hasSkillIssues) ? 1 : 0;
 
-  const exit = s.critical > 0 || s.poisoned > 0 ? 2 : s.high > 0 ? 1 : 0;
-  console.log(`\n  ${exit === 0 ? GREEN + "✓ No critical issues" : RED + "✗ Issues found"}${RESET}`);
+  status(`  ${c.dim}${"─".repeat(40)}${c.reset}`);
+  status("");
 
-  // Upload results to dashboard
+  if (exit === 0) {
+    status(`  ${c.green}✓${c.reset} ${c.bold}No issues found${c.reset}  ${c.dim}${nonDecoyServers.length} server${nonDecoyServers.length !== 1 ? "s" : ""}, ${totalTools} tools${c.reset}`);
+  } else {
+    const parts = [];
+    if (toolCounts.critical > 0) parts.push(`${c.red}${toolCounts.critical} critical${c.reset}`);
+    if (toolCounts.high > 0) parts.push(`${c.red}${toolCounts.high} high${c.reset}`);
+    if (toolCounts.medium > 0) parts.push(`${c.yellow}${toolCounts.medium} warning${c.reset}`);
+    if (s.poisoned > 0) parts.push(`${c.red}${s.poisoned} poisoned${c.reset}`);
+    if (hasToxicFlows) parts.push(`${c.red}${results.toxicFlows.length} toxic flow${results.toxicFlows.length > 1 ? "s" : ""}${c.reset}`);
+    if (s.skillIssues > 0) parts.push(`${c.red}${s.skillIssues} skill issue${s.skillIssues > 1 ? "s" : ""}${c.reset}`);
+    status(`  ${c.red}✗${c.reset} ${c.bold}${parts.join(", ")}${c.reset}  ${c.dim}${nonDecoyServers.length} server${nonDecoyServers.length !== 1 ? "s" : ""}, ${totalTools} tools${c.reset}`);
+  }
+
+  // Upload
   if (reportMode) {
     if (!tokenArg) {
-      console.log(`\n  ${RED}--report requires a token. Use --token=YOUR_TOKEN or set DECOY_TOKEN.${RESET}\n`);
+      status("");
+      status(`  ${c.red}--report requires a token.${c.reset}`);
+      status(`  ${c.dim}Pass --token=YOUR_TOKEN or set DECOY_TOKEN in your environment.${c.reset}`);
+      status("");
       process.exit(1);
     }
+    const sp = spinner("Uploading results…");
     try {
       const resp = await fetch("https://app.decoy.run/api/scan/upload?token=" + tokenArg, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ results }),
       });
-      const data = await resp.json();
-      if (data.ok) {
-        console.log(`\n  ${GREEN}✓ Results uploaded${RESET} ${DIM}(score: ${data.score}/100)${RESET}`);
-        console.log(`  ${DIM}${data.dashboardUrl}${RESET}\n`);
+      const d = await resp.json();
+      sp.stop();
+      if (d.ok) {
+        status(`  ${c.green}✓${c.reset} Uploaded ${c.dim}(score: ${d.score}/100)${c.reset}`);
+        status(`  ${c.dim}${d.dashboardUrl}${c.reset}`);
       } else {
-        console.log(`\n  ${RED}Upload failed: ${data.error}${RESET}\n`);
+        status(`  ${c.red}Upload failed: ${d.error}${c.reset}`);
       }
     } catch (e) {
-      console.log(`\n  ${RED}Upload failed: ${e.message}${RESET}\n`);
+      sp.stop();
+      status(`  ${c.red}Upload failed: ${e.message}${c.reset}`);
+      status(`  ${c.dim}Check your network connection and try again.${c.reset}`);
     }
-  } else {
-    console.log("");
   }
 
-  process.exit(exit);
+  // #5: Next steps — context-aware based on whether decoy-mcp is installed
+  status("");
+  if (exit !== 0) {
+    if (hasDecoy) {
+      // Decoy already installed — suggest monitoring, not re-installing
+      status(`  ${c.bold}Next:${c.reset}`);
+      status(`  ${c.dim}$${c.reset} npx decoy-mcp watch      ${c.dim}# Watch triggers in real time${c.reset}`);
+      status(`  ${c.dim}$${c.reset} npx decoy-mcp status     ${c.dim}# Check recent triggers${c.reset}`);
+      status(`  ${c.dim}$${c.reset} npx decoy-scan --report   ${c.dim}# Track over time in dashboard${c.reset}`);
+    } else {
+      status(`  ${c.bold}What now?${c.reset}`);
+      status(`  Scanning found the risk. Tripwires detect when it's exploited.`);
+      status("");
+      status(`  ${c.dim}$${c.reset} npx decoy-mcp init       ${c.dim}# Install tripwires (2 min setup)${c.reset}`);
+      status(`  ${c.dim}$${c.reset} npx decoy-scan --sarif    ${c.dim}# Export for CI/CD${c.reset}`);
+      status(`  ${c.dim}$${c.reset} npx decoy-scan --report   ${c.dim}# Track over time in dashboard${c.reset}`);
+    }
+  } else {
+    status(`  ${c.dim}$${c.reset} npx decoy-scan --report   ${c.dim}# Track over time in dashboard${c.reset}`);
+  }
+
+  // CI/CD policy gate
+  let policyExit = exit;
+  if (policyArg) {
+    const policies = policyArg.split(",").map(p => p.trim());
+    const violations = [];
+
+    for (const policy of policies) {
+      switch (policy) {
+        case "no-critical":
+          if (toolCounts.critical > 0) violations.push(`${toolCounts.critical} critical tool${toolCounts.critical > 1 ? "s" : ""} found`);
+          break;
+        case "no-high":
+          if (toolCounts.high > 0) violations.push(`${toolCounts.high} high-risk tool${toolCounts.high > 1 ? "s" : ""} found`);
+          break;
+        case "no-toxic-flows":
+          if (hasToxicFlows) violations.push(`${results.toxicFlows.length} toxic flow${results.toxicFlows.length > 1 ? "s" : ""} detected`);
+          break;
+        case "no-poisoning":
+          if (nonDecoyPoisoned > 0) violations.push(`${nonDecoyPoisoned} tool poisoning finding${nonDecoyPoisoned > 1 ? "s" : ""}`);
+          break;
+        case "no-secrets":
+          const secrets = results.servers.reduce((n, s) => n + s.findings.filter(f => f.source === "env-config").length, 0);
+          if (secrets > 0) violations.push(`${secrets} exposed secret${secrets > 1 ? "s" : ""}`);
+          break;
+        case "require-tripwires": {
+          const hasDecoyServer = results.servers.some(s => s.decoy);
+          if (!hasDecoyServer) violations.push("No tripwires installed");
+          break;
+        }
+        default:
+          if (!policy.startsWith("max-")) {
+            status(`  ${c.yellow}Unknown policy: ${policy}${c.reset}`);
+          } else {
+            // max-critical=0, max-high=5, etc.
+            const [, level, maxStr] = policy.match(/^max-(\w+)=(\d+)$/) || [];
+            const max = parseInt(maxStr);
+            if (level && !isNaN(max)) {
+              const count = level === "toxic-flows" ? (results.toxicFlows?.length || 0) : (toolCounts[level] || 0);
+              if (count > max) violations.push(`${count} ${level} exceeds max ${max}`);
+            }
+          }
+      }
+    }
+
+    if (violations.length > 0) {
+      status("");
+      status(`  ${c.red}Policy violations:${c.reset}`);
+      for (const v of violations) status(`  ${c.red}✗${c.reset} ${v}`);
+      policyExit = 2;
+    } else {
+      status("");
+      status(`  ${c.green}✓${c.reset} All policies passed`);
+    }
+  }
+
+  // Write scan cache for decoy-mcp exposure analysis
+  writeScanCache(results);
+
+  status("");
+  process.exit(policyExit);
+}
+
+// Write scan results to ~/.decoy/scan.json for decoy-mcp exposure analysis
+function writeScanCache(results) {
+  try {
+    const cacheDir = join(homedir(), ".decoy");
+    mkdirSync(cacheDir, { recursive: true });
+    writeFileSync(join(cacheDir, "scan.json"), JSON.stringify(results, null, 2) + "\n");
+  } catch {}
 }
 
 main().catch(e => {
-  console.error(`Error: ${e.message}`);
+  status(`  ${c.red}error:${c.reset} ${e.message}`);
+  if (verboseMode) status(`  ${c.dim}${e.stack}${c.reset}`);
   process.exit(1);
 });
