@@ -159,8 +159,26 @@ async function main() {
   const configs = discoverConfigs();
   if (configs.length === 0) {
     if (jsonMode) {
-      data(JSON.stringify({ error: "No MCP configurations found", hosts: [] }));
-    } else if (!sarifMode) {
+      data(JSON.stringify({
+        tool: "decoy-scan",
+        version: VERSION,
+        timestamp: new Date().toISOString(),
+        hosts: [],
+        servers: [],
+        summary: { total: 0, critical: 0, high: 0, medium: 0, low: 0, errors: 0, poisoned: 0, suspicious: 0, envExposures: 0, toxicFlows: 0, manifestChanges: 0, skillIssues: 0 },
+        advisories: [],
+        toxicFlows: [],
+        skills: [],
+        owasp: [],
+        error: "No MCP configurations found",
+      }));
+    } else if (sarifMode) {
+      data(JSON.stringify({
+        $schema: "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
+        version: "2.1.0",
+        runs: [{ tool: { driver: { name: "decoy-scan", version: VERSION, informationUri: "https://github.com/decoy-run/decoy-scan" } }, results: [] }],
+      }));
+    } else {
       status(`  ${c.yellow}No MCP configurations found.${c.reset}`);
       status(`  ${c.dim}Checked: Claude Desktop, Cursor, Windsurf, VS Code, Claude Code, Zed, Cline${c.reset}`);
       status("");
