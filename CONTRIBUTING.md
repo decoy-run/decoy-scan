@@ -73,6 +73,16 @@ if (/* condition */) {
 
 ## Testing
 
+Run the full test suite before pushing:
+
+```bash
+npm test
+```
+
+This runs 48 tests covering CLI output, JSON/SARIF structure, policy gates, toxic flow detection, skill analysis, and manifest hashing. All tests must pass before opening a PR.
+
+For manual testing with different output modes:
+
 ```bash
 node bin/cli.mjs --no-probe              # Config-only
 node bin/cli.mjs --no-advisories         # Skip network calls
@@ -86,7 +96,7 @@ node bin/cli.mjs --verbose               # Show everything
 1. Fork the repo
 2. Create a branch (`git checkout -b add-new-pattern`)
 3. Make your changes
-4. Test locally with all output modes
+4. Run `npm test` — all tests must pass
 5. Open a PR with a clear description
 
 ## Design Principles

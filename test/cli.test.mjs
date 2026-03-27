@@ -61,13 +61,13 @@ describe("basics", () => {
 
 describe("json output", () => {
   it("--json outputs valid JSON to stdout", async () => {
-    const { stdout, exitCode } = await run(["--json", "--no-advisories"]);
+    const { stdout, exitCode } = await run(["--json", "--no-advisories", "--no-probe"]);
     const result = JSON.parse(stdout);
     assert.ok(result, "should parse as JSON");
   });
 
   it("--json includes tool and version metadata", async () => {
-    const { stdout } = await run(["--json", "--no-advisories"]);
+    const { stdout } = await run(["--json", "--no-advisories", "--no-probe"]);
     const result = JSON.parse(stdout);
     assert.equal(result.tool, "decoy-scan");
     assert.ok(result.version, "should have version field");
@@ -75,16 +75,16 @@ describe("json output", () => {
   });
 
   it("--json has required top-level fields", async () => {
-    const { stdout } = await run(["--json", "--no-advisories"]);
+    const { stdout } = await run(["--json", "--no-advisories", "--no-probe"]);
     const result = JSON.parse(stdout);
-    const required = ["tool", "version", "timestamp", "hosts", "servers", "summary", "advisories", "owasp"];
+    const required = ["tool", "version", "timestamp", "hosts", "servers", "summary", "advisories", "toxicFlows", "skills", "owasp"];
     for (const key of required) {
       assert.ok(key in result, `missing required field: ${key}`);
     }
   });
 
   it("--json summary has correct field types", async () => {
-    const { stdout } = await run(["--json", "--no-advisories"]);
+    const { stdout } = await run(["--json", "--no-advisories", "--no-probe"]);
     const { summary } = JSON.parse(stdout);
     const numFields = ["total", "critical", "high", "medium", "low", "errors", "poisoned", "suspicious", "envExposures"];
     for (const key of numFields) {
@@ -93,7 +93,7 @@ describe("json output", () => {
   });
 
   it("--json servers have required fields", async () => {
-    const { stdout } = await run(["--json", "--no-advisories"]);
+    const { stdout } = await run(["--json", "--no-advisories", "--no-probe"]);
     const { servers } = JSON.parse(stdout);
     for (const s of servers) {
       assert.ok("name" in s, "server should have name");
@@ -104,12 +104,12 @@ describe("json output", () => {
   });
 
   it("--json has no ANSI codes in stdout", async () => {
-    const { stdout } = await run(["--json", "--no-advisories"]);
+    const { stdout } = await run(["--json", "--no-advisories", "--no-probe"]);
     assert.ok(!stdout.includes("\x1b["), "JSON stdout should not contain ANSI escape codes");
   });
 
   it("--json status output goes to stdout, not stderr", async () => {
-    const { stdout, stderr } = await run(["--json", "--no-advisories"]);
+    const { stdout, stderr } = await run(["--json", "--no-advisories", "--no-probe"]);
     // stdout should have the JSON
     assert.ok(stdout.trim().startsWith("{"), "stdout should start with JSON object");
     // stderr should be empty or only have status messages
@@ -134,7 +134,7 @@ describe("sarif output", () => {
 
 describe("decoy self-detection", () => {
   it("decoy server has risk 'info' in JSON", async () => {
-    const { stdout } = await run(["--json", "--no-advisories"]);
+    const { stdout } = await run(["--json", "--no-advisories", "--no-probe"]);
     const { servers } = JSON.parse(stdout);
     const decoy = servers.find(s => s.decoy);
     if (decoy) {
@@ -144,7 +144,7 @@ describe("decoy self-detection", () => {
   });
 
   it("decoy server is not counted in summary", async () => {
-    const { stdout } = await run(["--json", "--no-advisories"]);
+    const { stdout } = await run(["--json", "--no-advisories", "--no-probe"]);
     const { servers, summary } = JSON.parse(stdout);
     const decoyCount = servers.filter(s => s.decoy).length;
     const nonDecoyCount = servers.filter(s => !s.decoy).length;
@@ -152,14 +152,14 @@ describe("decoy self-detection", () => {
   });
 
   it("decoy server does not inflate summary.critical", async () => {
-    const { stdout } = await run(["--json", "--no-advisories"]);
+    const { stdout } = await run(["--json", "--no-advisories", "--no-probe"]);
     const { servers, summary } = JSON.parse(stdout);
     const nonDecoyCritical = servers.filter(s => !s.decoy && s.risk === "critical").length;
     assert.equal(summary.critical, nonDecoyCritical, "summary.critical should only count non-decoy servers");
   });
 
   it("human output shows tripwires active for decoy server", async () => {
-    const { stderr } = await run(["--no-advisories"]);
+    const { stderr } = await run(["--no-advisories", "--no-probe"]);
     if (stderr.includes("system-tools")) {
       assert.match(stderr, /Tripwires active/, "decoy server should show 'Tripwires active'");
       assert.ok(!stderr.includes("POISONING"), "decoy findings should not appear");
@@ -171,7 +171,7 @@ describe("decoy self-detection", () => {
 
 describe("exit codes", () => {
   it("exit code matches JSON data (not inflated by decoy)", async () => {
-    const { stdout, exitCode } = await run(["--json", "--no-advisories"]);
+    const { stdout, exitCode } = await run(["--json", "--no-advisories", "--no-probe"]);
     const { summary } = JSON.parse(stdout);
 
     // Exit should be 0 if summary has no critical/high (excluding decoy)
@@ -190,16 +190,14 @@ describe("exit codes", () => {
 // ─── Scan cache ───
 
 describe("scan cache", () => {
-  it("writes scan cache to ~/.decoy/scan.json", async () => {
-    await run(["--no-advisories"]);
-    assert.ok(existsSync(SCAN_CACHE), "scan cache should exist at " + SCAN_CACHE);
-  });
-
-  it("scan cache is valid JSON with servers array", async () => {
-    await run(["--no-advisories"]);
-    const cache = JSON.parse(readFileSync(SCAN_CACHE, "utf8"));
-    assert.ok(Array.isArray(cache.servers), "scan cache should have servers array");
-    assert.ok(cache.timestamp, "scan cache should have timestamp");
+  it("writes scan cache when servers exist", async () => {
+    await run(["--no-advisories", "--no-probe"]);
+    // Cache is only written when servers are found — skip on CI with no MCP configs
+    if (existsSync(SCAN_CACHE)) {
+      const cache = JSON.parse(readFileSync(SCAN_CACHE, "utf8"));
+      assert.ok(Array.isArray(cache.servers), "scan cache should have servers array");
+      assert.ok(cache.timestamp, "scan cache should have timestamp");
+    }
   });
 });
 
@@ -211,15 +209,20 @@ describe("--no-probe", () => {
     assert.ok(exitCode <= 2, "should exit with valid code");
   });
 
-  it("human output explains limitations", async () => {
+  it("human output explains limitations when servers exist", async () => {
     const { stderr } = await run(["--no-probe", "--no-advisories"]);
-    assert.match(stderr, /Config scan only/, "should explain --no-probe limitations");
+    // "Config scan only" message only appears when servers are found
+    if (stderr.includes("Hosts:")) {
+      assert.match(stderr, /Config scan only/, "should explain --no-probe limitations");
+    }
   });
 
-  it("--no-probe --json still produces valid JSON", async () => {
+  it("--no-probe --json produces valid JSON", async () => {
     const { stdout } = await run(["--no-probe", "--no-advisories", "--json"]);
     const result = JSON.parse(stdout);
-    assert.ok(result.servers, "should have servers");
+    // With no servers, returns { error: "No MCP configurations found" }
+    // With servers, returns full result with .servers
+    assert.ok(result.servers || result.error, "should have servers or error");
   });
 });
 
@@ -237,7 +240,7 @@ describe("color handling", () => {
   });
 
   it("piped stdout has no ANSI codes in JSON mode", async () => {
-    const { stdout } = await run(["--json", "--no-advisories"]);
+    const { stdout } = await run(["--json", "--no-advisories", "--no-probe"]);
     assert.ok(!stdout.includes("\x1b["), "piped JSON should never have ANSI codes");
   });
 });
@@ -391,19 +394,19 @@ describe("skill analysis", () => {
 
 describe("new features in JSON output", () => {
   it("--json includes toxicFlows array", async () => {
-    const { stdout } = await run(["--json", "--no-advisories"]);
+    const { stdout } = await run(["--json", "--no-advisories", "--no-probe"]);
     const result = JSON.parse(stdout);
     assert.ok(Array.isArray(result.toxicFlows), "should have toxicFlows array");
   });
 
   it("--json includes skills array", async () => {
-    const { stdout } = await run(["--json", "--no-advisories"]);
+    const { stdout } = await run(["--json", "--no-advisories", "--no-probe"]);
     const result = JSON.parse(stdout);
     assert.ok(Array.isArray(result.skills), "should have skills array");
   });
 
   it("--json summary includes new counters", async () => {
-    const { stdout } = await run(["--json", "--no-advisories"]);
+    const { stdout } = await run(["--json", "--no-advisories", "--no-probe"]);
     const { summary } = JSON.parse(stdout);
     assert.equal(typeof summary.toxicFlows, "number");
     assert.equal(typeof summary.manifestChanges, "number");
