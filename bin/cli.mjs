@@ -430,20 +430,20 @@ async function main() {
     }
   }
 
-  // #5: Next steps — context-aware based on whether decoy-mcp is installed
+  // #5: Next steps — context-aware based on whether decoy-tripwire is installed
   status("");
   if (exit !== 0) {
     if (hasDecoy) {
       // Decoy already installed — suggest monitoring, not re-installing
       status(`  ${c.bold}Next:${c.reset}`);
-      status(`  ${c.dim}$${c.reset} npx decoy-mcp watch      ${c.dim}# Watch triggers in real time${c.reset}`);
-      status(`  ${c.dim}$${c.reset} npx decoy-mcp status     ${c.dim}# Check recent triggers${c.reset}`);
+      status(`  ${c.dim}$${c.reset} npx decoy-tripwire watch      ${c.dim}# Watch triggers in real time${c.reset}`);
+      status(`  ${c.dim}$${c.reset} npx decoy-tripwire status     ${c.dim}# Check recent triggers${c.reset}`);
       status(`  ${c.dim}$${c.reset} npx decoy-scan --report   ${c.dim}# Track over time in dashboard${c.reset}`);
     } else {
       status(`  ${c.bold}What now?${c.reset}`);
       status(`  Scanning found the risk. Tripwires detect when it's exploited.`);
       status("");
-      status(`  ${c.dim}$${c.reset} npx decoy-mcp init       ${c.dim}# Install tripwires (2 min setup)${c.reset}`);
+      status(`  ${c.dim}$${c.reset} npx decoy-tripwire init       ${c.dim}# Install tripwires (2 min setup)${c.reset}`);
       status(`  ${c.dim}$${c.reset} npx decoy-scan --sarif    ${c.dim}# Export for CI/CD${c.reset}`);
       status(`  ${c.dim}$${c.reset} npx decoy-scan --report   ${c.dim}# Track over time in dashboard${c.reset}`);
     }
@@ -549,7 +549,7 @@ async function main() {
       }
       const critTools = server.tools.filter(t => t.risk === "critical");
       if (critTools.length > 0 && !results.servers.some(s => s.decoy)) {
-        fixes.push({ server: server.name, type: "tripwire", description: `Install tripwires to detect attacks: npx decoy-mcp init` });
+        fixes.push({ server: server.name, type: "tripwire", description: `Install tripwires to detect attacks: npx decoy-tripwire init` });
       }
     }
 
@@ -565,14 +565,14 @@ async function main() {
     }
   }
 
-  // Write scan cache for decoy-mcp exposure analysis
+  // Write scan cache for decoy-tripwire exposure analysis
   writeScanCache(results);
 
   status("");
   process.exit(policyExit);
 }
 
-// Write scan results to ~/.decoy/scan.json for decoy-mcp exposure analysis
+// Write scan results to ~/.decoy/scan.json for decoy-tripwire exposure analysis
 function writeScanCache(results) {
   try {
     const cacheDir = join(homedir(), ".decoy");

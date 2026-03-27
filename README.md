@@ -48,7 +48,7 @@ Configurable policies for CI/CD pipelines:
 ```bash
 npx decoy-scan --policy=no-critical              # Fail on critical tools
 npx decoy-scan --policy=no-toxic-flows           # Fail on toxic data flows
-npx decoy-scan --policy=require-tripwires         # Fail if decoy-mcp not installed
+npx decoy-scan --policy=require-tripwires         # Fail if decoy-tripwire not installed
 npx decoy-scan --policy=no-poisoning             # Fail on prompt injection
 npx decoy-scan --policy=no-secrets               # Fail on exposed env vars
 npx decoy-scan --policy=max-high=5               # Fail if >5 high-risk tools
@@ -117,7 +117,7 @@ console.log(results.servers[0].manifestHash);  // "45c4c571f03c78a2"
 | SARIF output | **Yes** | No |
 | OWASP mapping | **Yes** | No |
 | Hosts supported | **8** | 6 |
-| Tripwire integration | **Yes (decoy-mcp)** | No |
+| Tripwire integration | **Yes (decoy-tripwire)** | No |
 
 ## Supported Hosts
 
@@ -125,7 +125,7 @@ Claude Desktop, Cursor, Windsurf, VS Code, Claude Code (global + project), Zed, 
 
 ## Related
 
-- [decoy-mcp](https://npmjs.com/package/decoy-mcp) — Tripwire tools that detect when agents are compromised
+- [decoy-tripwire](https://npmjs.com/package/decoy-tripwire) — Tripwire tools that detect when agents are compromised
 - [Decoy Guard](https://decoy.run) — Dashboard, threat intel, compliance reports
 - [OWASP Agentic Top 10](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/)
 

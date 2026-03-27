@@ -193,7 +193,7 @@ export function analyzeServerCommand(entry) {
         "@modelcontextprotocol/server-sqlite", "@modelcontextprotocol/server-puppeteer",
         "@modelcontextprotocol/server-brave-search", "@modelcontextprotocol/server-everything",
         "@modelcontextprotocol/server-sequential-thinking",
-        "decoy-mcp", "mcp-server-sqlite", "mcp-server-filesystem",
+        "decoy-tripwire", "mcp-server-sqlite", "mcp-server-filesystem",
       ]);
       // Check for close-but-wrong names
       if (!known.has(pkg) && /^@?m[ce]p-?server/i.test(pkg)) {
