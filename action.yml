@@ -1,0 +1,113 @@
+name: Decoy Scan
+description: Scan MCP server configurations for security risks — tool poisoning, toxic flows, secrets exposure, and more.
+author: decoy-run
+
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  policy:
+    description: >
+      Comma-separated policy rules. Fails the step if violated.
+      Rules: no-critical, no-high, no-poisoning, no-toxic-flows, no-secrets, require-tripwires, max-critical=N, max-high=N
+    required: false
+    default: "no-critical,no-poisoning"
+  sarif:
+    description: Upload SARIF results to GitHub Security tab
+    required: false
+    default: "true"
+  report:
+    description: Upload results to Decoy Guard dashboard (requires token)
+    required: false
+    default: "false"
+  token:
+    description: Decoy API token for dashboard reporting (or set DECOY_TOKEN secret)
+    required: false
+  config:
+    description: Path to MCP config file to scan (defaults to repo .mcp.json)
+    required: false
+  verbose:
+    description: Show all tools including low-risk
+    required: false
+    default: "false"
+
+outputs:
+  exit-code:
+    description: "0 = clean, 1 = high-risk issues, 2 = critical issues or poisoning"
+  sarif-file:
+    description: Path to the SARIF output file
+  summary:
+    description: One-line summary of findings
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+
+    - name: Run Decoy Scan
+      id: scan
+      shell: bash
+      env:
+        DECOY_TOKEN: ${{ inputs.token || '' }}
+        INPUT_POLICY: ${{ inputs.policy }}
+        INPUT_VERBOSE: ${{ inputs.verbose }}
+        INPUT_REPORT: ${{ inputs.report }}
+        INPUT_SARIF: ${{ inputs.sarif }}
+      run: |
+        # Build flags
+        FLAGS="--no-color"
+
+        if [ -n "$INPUT_POLICY" ]; then
+          FLAGS="$FLAGS --policy=$INPUT_POLICY"
+        fi
+
+        if [ "$INPUT_VERBOSE" = "true" ]; then
+          FLAGS="$FLAGS --verbose"
+        fi
+
+        if [ "$INPUT_REPORT" = "true" ] && [ -n "$DECOY_TOKEN" ]; then
+          FLAGS="$FLAGS --report --token=$DECOY_TOKEN"
+        fi
+
+        # Run scan — capture exit code without failing the step yet
+        set +e
+        npx -y decoy-scan@latest $FLAGS 2>&1 | tee "$RUNNER_TEMP/decoy-scan.log"
+        SCAN_EXIT=${PIPESTATUS[0]}
+        set -e
+
+        echo "exit-code=$SCAN_EXIT" >> "$GITHUB_OUTPUT"
+
+        # Generate SARIF if requested
+        if [ "$INPUT_SARIF" = "true" ]; then
+          npx -y decoy-scan@latest --sarif --no-advisories > "$RUNNER_TEMP/decoy-scan.sarif" 2>/dev/null || true
+          echo "sarif-file=$RUNNER_TEMP/decoy-scan.sarif" >> "$GITHUB_OUTPUT"
+        fi
+
+        # Extract summary line for output
+        SUMMARY=$(grep -E '(✓|✗).*server' "$RUNNER_TEMP/decoy-scan.log" | tail -1 | sed 's/\x1b\[[0-9;]*m//g' | xargs)
+        echo "summary=$SUMMARY" >> "$GITHUB_OUTPUT"
+
+        # Write job summary
+        echo "## Decoy Scan" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        if [ "$SCAN_EXIT" -eq 0 ]; then
+          echo "✅ **Clean** — no issues found" >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "🚨 **Issues found** — $SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Run \`npx decoy-scan -v\` locally for full details." >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        exit $SCAN_EXIT
+
+    - name: Upload SARIF to GitHub Security
+      if: always() && inputs.sarif == 'true' && steps.scan.outputs.sarif-file != ''
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ steps.scan.outputs.sarif-file }}
+        category: decoy-scan
+      continue-on-error: true

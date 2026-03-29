@@ -28,31 +28,70 @@ Scans Claude Desktop, Cursor, Windsurf, VS Code, Claude Code, Zed, and Cline. Fi
 | Permission scope | Over-privileged servers, dangerous capability combinations |
 | OWASP mapping | Every finding mapped to ASI01–ASI05 |
 
-## CI/CD Integration
+## GitHub Action
 
-Three lines of YAML. Breaks the build on any policy violation.
+One step. Scans MCP configs, enforces policy, uploads results to GitHub Security tab.
 
 ```yaml
 # .github/workflows/mcp-security.yml
-- run: npx decoy-scan --policy=no-critical,no-toxic-flows,require-tripwires
+name: MCP Security
+on: [push, pull_request]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: decoy-run/decoy-scan@v1
+```
+
+That's it. Fails the build if critical tools or prompt injection are found. Results appear in the Security tab.
+
+### With options
+
+```yaml
+- uses: decoy-run/decoy-scan@v1
+  with:
+    policy: no-critical,no-poisoning,no-toxic-flows
+    report: true
+    token: ${{ secrets.DECOY_TOKEN }}
+```
+
+### Inputs
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `policy` | `no-critical,no-poisoning` | Comma-separated policy rules |
+| `sarif` | `true` | Upload SARIF to GitHub Security tab |
+| `report` | `false` | Upload to Decoy Guard dashboard |
+| `token` | — | Decoy API token (for `report`) |
+| `verbose` | `false` | Show all tools including low-risk |
+
+### Policy rules
+
+```
+no-critical          Fail on critical tools (code exec, file write)
+no-high              Fail on high-risk tools (file read, network)
+no-poisoning         Fail on prompt injection in tool descriptions
+no-toxic-flows       Fail on cross-server data leak / destructive chains
+no-secrets           Fail on secrets exposed in MCP config
+require-tripwires    Fail if decoy-tripwire not installed
+max-critical=N       Fail if more than N critical tools
+max-high=N           Fail if more than N high-risk tools
+```
+
+### Manual CI/CD
+
+If you prefer raw commands over the Action:
+
+```yaml
+- run: npx decoy-scan --policy=no-critical,no-poisoning
 - run: npx decoy-scan --sarif > results.sarif
 - uses: github/codeql-action/upload-sarif@v3
   with:
     sarif_file: results.sarif
-```
-
-### Policy Gate
-
-Configurable policies for CI/CD pipelines:
-
-```bash
-npx decoy-scan --policy=no-critical              # Fail on critical tools
-npx decoy-scan --policy=no-toxic-flows           # Fail on toxic data flows
-npx decoy-scan --policy=require-tripwires         # Fail if decoy-tripwire not installed
-npx decoy-scan --policy=no-poisoning             # Fail on prompt injection
-npx decoy-scan --policy=no-secrets               # Fail on exposed env vars
-npx decoy-scan --policy=max-high=5               # Fail if >5 high-risk tools
-npx decoy-scan --policy=no-critical,no-toxic-flows,require-tripwires  # Combine
 ```
 
 ## Options

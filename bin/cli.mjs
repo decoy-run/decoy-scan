@@ -152,7 +152,6 @@ async function main() {
   if (!machineMode) {
     status("");
     status(`  ${c.bold}decoy-scan${c.reset} ${c.dim}v${VERSION}${c.reset}`);
-    status("");
   }
 
   // Discovery
@@ -252,7 +251,7 @@ async function main() {
     if (criticalTools.length > 0 || highTools.length > 0) hasDangerousTools = true;
 
     if (criticalTools.length > 0) {
-      status(`    ${c.red}${criticalTools.map(t => t.name).join(", ")}${c.reset}`);
+      status(`    ${c.red}${c.bold}${criticalTools.map(t => t.name).join(", ")}${c.reset}`);
     }
     if (highTools.length > 0) {
       status(`    ${c.red}${highTools.map(t => t.name).join(", ")}${c.reset}`);
@@ -289,15 +288,24 @@ async function main() {
       }
 
       const categoryInfo = {
-        "tool-description":   { label: "Prompt injection detected in tool descriptions", tier: "red" },
-        "server-command":     { label: "Suspicious server spawn command", tier: "red" },
-        "transport":          { label: "Insecure transport (HTTP without TLS)", tier: "red" },
-        "env-config":         { label: "Secrets exposed via environment variables", tier: "yellow" },
-        "tool-count":         { label: "Large attack surface", tier: "yellow" },
-        "permission-scope":   { label: "Server has too many permissions", tier: "yellow" },
-        "readiness":          { label: "Tools missing input constraints or safety checks", tier: "info" },
-        "input-sanitization": { label: "Tools accept unconstrained input", tier: "info" },
-        "manifest-change":    { label: "Tool manifest changed since last scan", tier: "yellow" },
+        "tool-description":   { label: "Prompt injection detected in tool descriptions", tier: "red",
+                                fix: "Audit tool descriptions for hidden instructions — remove any text that overrides agent behavior" },
+        "server-command":     { label: "Suspicious server spawn command", tier: "red",
+                                fix: "Replace shell pipes with direct binary execution — avoid sh -c and eval patterns" },
+        "transport":          { label: "Insecure transport (HTTP without TLS)", tier: "red",
+                                fix: "Switch to HTTPS or use stdio transport — never send credentials over plain HTTP" },
+        "env-config":         { label: "Secrets exposed via environment variables", tier: "yellow",
+                                fix: "Move secrets to a .env file or vault — don't inline them in MCP config" },
+        "tool-count":         { label: "Large attack surface", tier: "yellow",
+                                fix: "Split into focused servers with fewer tools — limit blast radius per server" },
+        "permission-scope":   { label: "Server has too many permissions", tier: "yellow",
+                                fix: "Apply least-privilege — separate read-only and write servers" },
+        "readiness":          { label: "Tools missing input constraints or safety checks", tier: "info",
+                                fix: "Add inputSchema with descriptions, required fields, and type constraints" },
+        "input-sanitization": { label: "Tools accept unconstrained input", tier: "info",
+                                fix: "Add maxLength, pattern, or enum constraints to string parameters" },
+        "manifest-change":    { label: "Tool manifest changed since last scan", tier: "yellow",
+                                fix: "Review the diff — new tools may introduce unintended capabilities" },
       };
 
       const tierColor = { red: c.red, yellow: c.yellow, info: c.dim };
@@ -309,6 +317,9 @@ async function main() {
         const color = tierColor[info.tier] || "";
         const count = items.length > 1 ? ` ${c.dim}(${items.length})${c.reset}` : "";
         status(`    ${color}${info.label}${c.reset}${count}`);
+        if (info.fix) {
+          status(`    ${c.dim}  → ${info.fix}${c.reset}`);
+        }
       }
     }
 
@@ -362,9 +373,8 @@ async function main() {
     }
   }
 
-  // #6: Tool risk legend — show once if dangerous tools exist
   if (hasDangerousTools) {
-    status(`  ${c.dim}Critical = code exec, file write, payments · High = file read, network, credentials${c.reset}`);
+    status(`  ${c.dim}critical = code exec, file write, payments · high = file read, network, credentials${c.reset}`);
   }
 
   // #7: Summary uses tool-level counts, not server-level
@@ -384,10 +394,9 @@ async function main() {
   const exit = toolCounts.critical > 0 || nonDecoyPoisoned > 0 || hasToxicFlows ? 2 : (toolCounts.high > 0 || hasSkillIssues) ? 1 : 0;
 
   status(`  ${c.dim}${"─".repeat(40)}${c.reset}`);
-  status("");
 
   if (exit === 0) {
-    status(`  ${c.green}✓${c.reset} ${c.bold}No issues found${c.reset}  ${c.dim}${nonDecoyServers.length} server${nonDecoyServers.length !== 1 ? "s" : ""}, ${totalTools} tools${c.reset}`);
+    status(`  ${c.green}✓${c.reset} ${c.bold}Clean.${c.reset}  ${c.dim}${nonDecoyServers.length} server${nonDecoyServers.length !== 1 ? "s" : ""}, ${totalTools} tool${totalTools !== 1 ? "s" : ""} — no issues found${c.reset}`);
   } else {
     const parts = [];
     if (toolCounts.critical > 0) parts.push(`${c.red}${toolCounts.critical} critical${c.reset}`);
@@ -396,7 +405,8 @@ async function main() {
     if (s.poisoned > 0) parts.push(`${c.red}${s.poisoned} poisoned${c.reset}`);
     if (hasToxicFlows) parts.push(`${c.red}${results.toxicFlows.length} toxic flow${results.toxicFlows.length > 1 ? "s" : ""}${c.reset}`);
     if (s.skillIssues > 0) parts.push(`${c.red}${s.skillIssues} skill issue${s.skillIssues > 1 ? "s" : ""}${c.reset}`);
-    status(`  ${c.red}✗${c.reset} ${c.bold}${parts.join(", ")}${c.reset}  ${c.dim}${nonDecoyServers.length} server${nonDecoyServers.length !== 1 ? "s" : ""}, ${totalTools} tools${c.reset}`);
+    status(`  ${c.red}✗${c.reset} ${parts.join(", ")}  ${c.dim}across ${nonDecoyServers.length} server${nonDecoyServers.length !== 1 ? "s" : ""}, ${totalTools} tool${totalTools !== 1 ? "s" : ""}${c.reset}`);
+    status(`  ${c.dim}  Better to find it here than in prod.${c.reset}`);
   }
 
   // Upload
@@ -430,25 +440,22 @@ async function main() {
     }
   }
 
-  // #5: Next steps — context-aware based on whether decoy-tripwire is installed
+  // Next steps — context-aware based on whether decoy-tripwire is installed
   status("");
   if (exit !== 0) {
     if (hasDecoy) {
-      // Decoy already installed — suggest monitoring, not re-installing
-      status(`  ${c.bold}Next:${c.reset}`);
-      status(`  ${c.dim}$${c.reset} npx decoy-tripwire watch      ${c.dim}# Watch triggers in real time${c.reset}`);
-      status(`  ${c.dim}$${c.reset} npx decoy-tripwire status     ${c.dim}# Check recent triggers${c.reset}`);
-      status(`  ${c.dim}$${c.reset} npx decoy-scan --report   ${c.dim}# Track over time in dashboard${c.reset}`);
+      status(`  ${c.dim}$${c.reset} npx decoy-tripwire watch    ${c.dim}# Watch triggers in real time${c.reset}`);
+      status(`  ${c.dim}$${c.reset} npx decoy-tripwire status   ${c.dim}# Check recent triggers${c.reset}`);
+      status(`  ${c.dim}$${c.reset} npx decoy-scan --report     ${c.dim}# Track over time in dashboard${c.reset}`);
     } else {
-      status(`  ${c.bold}What now?${c.reset}`);
-      status(`  Scanning found the risk. Tripwires detect when it's exploited.`);
+      status(`  ${c.dim}Scanning found the risk. Tripwires catch when it's exploited.${c.reset}`);
       status("");
-      status(`  ${c.dim}$${c.reset} npx decoy-tripwire init       ${c.dim}# Install tripwires (2 min setup)${c.reset}`);
-      status(`  ${c.dim}$${c.reset} npx decoy-scan --sarif    ${c.dim}# Export for CI/CD${c.reset}`);
-      status(`  ${c.dim}$${c.reset} npx decoy-scan --report   ${c.dim}# Track over time in dashboard${c.reset}`);
+      status(`  ${c.dim}$${c.reset} npx decoy-tripwire init     ${c.dim}# Install tripwires (2 min)${c.reset}`);
+      status(`  ${c.dim}$${c.reset} npx decoy-scan --sarif      ${c.dim}# Export for CI/CD${c.reset}`);
+      status(`  ${c.dim}$${c.reset} npx decoy-scan --report     ${c.dim}# Track over time in dashboard${c.reset}`);
     }
   } else {
-    status(`  ${c.dim}$${c.reset} npx decoy-scan --report   ${c.dim}# Track over time in dashboard${c.reset}`);
+    status(`  ${c.dim}$${c.reset} npx decoy-scan --report     ${c.dim}# Track over time in dashboard${c.reset}`);
   }
 
   // CI/CD policy gate
@@ -533,35 +540,79 @@ async function main() {
     }
   }
 
-  // --fix: generate hardened MCP config
+  // --fix: detailed remediation plan per server
   if (fixMode) {
     const fixes = [];
     for (const server of results.servers) {
       if (server.decoy || server.error) continue;
+
+      const critTools = server.tools.filter(t => t.risk === "critical");
+      const highTools = server.tools.filter(t => t.risk === "high");
+
+      // Tool-level fixes
+      if (critTools.length > 0) {
+        fixes.push({ server: server.name, severity: "critical",
+          description: `${critTools.map(t => t.name).join(", ")} — add allowlist constraints or require user confirmation` });
+      }
+      if (highTools.length > 0) {
+        fixes.push({ server: server.name, severity: "high",
+          description: `${highTools.map(t => t.name).join(", ")} — restrict to read-only paths or scoped credentials` });
+      }
+
+      // Finding-level fixes
       for (const f of server.findings) {
-        if (f.source === "env-config") {
-          fixes.push({ server: server.name, type: "env", description: `Move ${f.envVar || "secret"} to a vault or .env file instead of MCP config` });
+        if (f.source === "tool-description") {
+          fixes.push({ server: server.name, severity: "critical",
+            description: `Prompt injection in tool descriptions — audit and remove hidden instructions` });
         }
-        if (f.source === "permission-scope") {
-          fixes.push({ server: server.name, type: "scope", description: `Server "${server.name}" has too many permissions — consider splitting into separate servers` });
-          break;
+        if (f.source === "env-config") {
+          fixes.push({ server: server.name, severity: "high",
+            description: `Move ${f.envVar || "secret"} to .env file or vault — don't inline in MCP config` });
+        }
+        if (f.source === "server-command") {
+          fixes.push({ server: server.name, severity: "critical",
+            description: `Replace shell command with direct binary path — avoid sh -c and eval` });
+        }
+        if (f.source === "transport") {
+          fixes.push({ server: server.name, severity: "critical",
+            description: `Switch to HTTPS or stdio transport — credentials are exposed over HTTP` });
         }
       }
-      const critTools = server.tools.filter(t => t.risk === "critical");
+
+      // Scope fix (once per server)
+      if (server.findings.some(f => f.source === "permission-scope")) {
+        fixes.push({ server: server.name, severity: "medium",
+          description: `Split into separate read-only and write servers — limit blast radius` });
+      }
+
+      // Tripwire recommendation
       if (critTools.length > 0 && !results.servers.some(s => s.decoy)) {
-        fixes.push({ server: server.name, type: "tripwire", description: `Install tripwires to detect attacks: npx decoy-tripwire init` });
+        fixes.push({ server: server.name, severity: "info",
+          description: `Install tripwires to detect exploitation: npx decoy-tripwire init` });
       }
     }
 
-    if (fixes.length > 0) {
+    // Deduplicate by description
+    const seen = new Set();
+    const unique = fixes.filter(f => {
+      const key = `${f.server}:${f.description}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    if (unique.length > 0) {
       status("");
-      status(`  ${c.bold}Fixes (${fixes.length}):${c.reset}`);
-      for (const fix of fixes) {
-        status(`  ${c.green}→${c.reset} ${c.dim}[${fix.server}]${c.reset} ${fix.description}`);
+      status(`  ${c.bold}Remediation (${unique.length}):${c.reset}`);
+      status("");
+      const sevColor = { critical: c.red, high: c.orange || c.yellow, medium: c.yellow, info: c.dim };
+      for (const fix of unique) {
+        const fc = sevColor[fix.severity] || c.dim;
+        status(`  ${fc}→${c.reset} ${c.dim}${fix.server}${c.reset}  ${fix.description}`);
       }
     } else {
       status("");
-      status(`  ${c.green}✓${c.reset} No fixes needed`);
+      status(`  ${c.green}✓${c.reset} Nothing to fix.`);
     }
   }
 
