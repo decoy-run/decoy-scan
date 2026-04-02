@@ -26,6 +26,7 @@ const versionMode = args.includes("--version") || args.includes("-V");
 const verboseMode = args.includes("--verbose") || args.includes("-v");
 const quietMode = args.includes("--quiet") || args.includes("-q");
 const reportMode = args.includes("--report");
+const briefMode = args.includes("--brief");
 const shareMode = args.includes("--share");
 const fixMode = args.includes("--fix");
 const skillsMode = args.includes("--skills");
@@ -103,14 +104,17 @@ ${c.bold}Usage:${c.reset}
   decoy-scan [flags]
 
 ${c.bold}Examples:${c.reset}
-  decoy-scan                    Scan all MCP server configurations
-  decoy-scan --no-probe         Config-only scan (skip server probing)
-  decoy-scan --json | jq        Pipe structured output to jq
-  decoy-scan --sarif > out.sarif Export for GitHub Security / VS Code
-  decoy-scan --report           Upload results to Decoy dashboard
+  npx decoy-scan                          Scan all MCP servers on this machine
+  npx decoy-scan --json                   Machine-readable JSON output
+  npx decoy-scan --json | jq '.summary'   Just the summary
+  npx decoy-scan --sarif > scan.sarif     SARIF for GitHub Security tab
+  npx decoy-scan --report --token=xxx     Upload results to Guard dashboard
+  npx decoy-scan --verbose                Show all tools including low-risk
+  npx decoy-scan --no-probe               Config-only scan (don't spawn servers)
 
 ${c.bold}Flags:${c.reset}
       --json              JSON output (stdout, pipeable to jq)
+      --brief             Minimal JSON summary (for agents with limited context)
       --sarif             SARIF 2.1.0 output
       --no-probe          Config-only scan — don't spawn servers
       --no-advisories     Skip advisory database lookup
@@ -140,6 +144,10 @@ ${c.bold}What it checks:${c.reset}
   Input sanitization          Permission scope analysis
   Toxic flow detection        Tool manifest change detection
   Skill scanning (--skills)   OWASP Agentic Top 10 mapping
+
+${c.bold}Agent integration:${c.reset}
+  This CLI ships with AGENTS.md for AI agent reference.
+  Use --json for structured output. Use --brief for minimal summaries.
 `);
   process.exit(0);
 }
@@ -157,6 +165,10 @@ async function main() {
   // Discovery
   const configs = discoverConfigs();
   if (configs.length === 0) {
+    if (briefMode && jsonMode) {
+      data(JSON.stringify({ servers: 0, critical: 0, high: 0, medium: 0, low: 0, poisoned: 0, status: "pass" }));
+      process.exit(0);
+    }
     if (jsonMode) {
       data(JSON.stringify({
         tool: "decoy-scan",
@@ -170,6 +182,7 @@ async function main() {
         skills: [],
         owasp: [],
         error: "No MCP configurations found",
+        hint: "Create a config at ~/.claude/settings.json or check https://decoy.run/docs",
       }));
     } else if (sarifMode) {
       data(JSON.stringify({
@@ -181,7 +194,7 @@ async function main() {
       status(`  ${c.yellow}No MCP configurations found.${c.reset}`);
       status(`  ${c.dim}Checked: Claude Desktop, Cursor, Windsurf, VS Code, Claude Code, Zed, Cline${c.reset}`);
       status("");
-      status(`  ${c.dim}Install an MCP-compatible client first, then re-run.${c.reset}`);
+      status(`  ${c.dim}Hint: Create a config at ~/.claude/settings.json or check https://decoy.run/docs${c.reset}`);
     }
     process.exit(0);
   }
@@ -209,6 +222,23 @@ async function main() {
     data(JSON.stringify(toSarif(results), null, 2));
     writeScanCache(results);
     process.exit(0);
+  }
+  if (briefMode && jsonMode) {
+    const s = results.summary;
+    const nonDecoyServers = results.servers.filter(srv => !srv.decoy && !srv.error).length;
+    const hasCritical = s.critical > 0 || s.poisoned > 0 || (results.toxicFlows?.length > 0);
+    const hasHigh = s.high > 0 || s.skillIssues > 0;
+    data(JSON.stringify({
+      servers: nonDecoyServers,
+      critical: s.critical,
+      high: s.high,
+      medium: s.medium,
+      low: s.low,
+      poisoned: s.poisoned,
+      status: hasCritical ? "fail" : hasHigh ? "warn" : "pass",
+    }));
+    writeScanCache(results);
+    process.exit(hasCritical ? 2 : hasHigh ? 1 : 0);
   }
   if (jsonMode) {
     data(JSON.stringify({ tool: "decoy-scan", version: VERSION, ...results }, null, 2));
@@ -238,6 +268,7 @@ async function main() {
 
     if (server.error) {
       status(`    ${c.red}Error: ${server.error}${c.reset}`);
+      status(`    ${c.dim}Hint: Check the server command and ensure the binary is installed and on your PATH${c.reset}`);
       status("");
       continue;
     }
@@ -414,7 +445,8 @@ async function main() {
     if (!tokenArg) {
       status("");
       status(`  ${c.red}--report requires a token.${c.reset}`);
-      status(`  ${c.dim}Pass --token=YOUR_TOKEN or set DECOY_TOKEN in your environment.${c.reset}`);
+      status(`  ${c.dim}Hint: Pass --token=YOUR_TOKEN or set DECOY_TOKEN in your environment.${c.reset}`);
+      status(`  ${c.dim}Sign up at https://app.decoy.run to get a token.${c.reset}`);
       status("");
       process.exit(1);
     }
@@ -432,6 +464,7 @@ async function main() {
         status(`  ${c.dim}${d.dashboardUrl}${c.reset}`);
       } else {
         status(`  ${c.red}Upload failed: ${d.error}${c.reset}`);
+        status(`  ${c.dim}Hint: Check that your token is valid — regenerate at https://app.decoy.run/dashboard${c.reset}`);
       }
     } catch (e) {
       sp.stop();
@@ -635,5 +668,6 @@ function writeScanCache(results) {
 main().catch(e => {
   status(`  ${c.red}error:${c.reset} ${e.message}`);
   if (verboseMode) status(`  ${c.dim}${e.stack}${c.reset}`);
+  status(`  ${c.dim}Hint: Run with --verbose for full stack trace, or report at https://github.com/decoy-run/decoy-scan/issues${c.reset}`);
   process.exit(1);
 });
