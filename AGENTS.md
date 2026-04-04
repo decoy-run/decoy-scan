@@ -62,11 +62,37 @@ import {
 |------|-------------|
 | `--json` | JSON output (machine-readable) |
 | `--sarif` | SARIF 2.1.0 output (GitHub Security, VS Code) |
+| `--brief` | Minimal JSON summary (use with `--json`) |
 | `--no-probe` | Config-only scan (don't spawn servers) |
 | `--no-advisories` | Skip Decoy advisory database check |
+| `--share` | Generate a shareable public URL for results |
+| `--yes`, `-y` | Skip confirmation prompts (for CI use) |
 | `--verbose`, `-v` | Show all tools including low-risk |
+| `--quiet`, `-q` | Suppress status output |
 | `--version`, `-V` | Print version |
 | `--help`, `-h` | Print help |
+
+## `--brief` Output Schema
+
+When using `--json --brief`, the output is a minimal summary object:
+
+```json
+{
+  "servers": 3,
+  "critical": 1,
+  "high": 2,
+  "medium": 4,
+  "low": 5,
+  "poisoned": 0,
+  "status": "fail"
+}
+```
+
+Fields:
+- `servers` — number of non-decoy, non-error servers scanned
+- `critical`, `high`, `medium`, `low` — tool risk counts
+- `poisoned` — number of tool poisoning findings
+- `status` — `"pass"` (clean), `"warn"` (high-risk), or `"fail"` (critical/poisoned/toxic flows)
 
 ## Exit Codes
 

@@ -4,11 +4,15 @@
   "description": "Security scanner for MCP server configurations. Finds risky tools, vulnerable packages, and suspicious servers across Claude Desktop, Cursor, VS Code, and more.",
   "type": "module",
   "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs"
+  },
   "bin": {
     "decoy-scan": "bin/cli.mjs"
   },
   "files": [
     "index.mjs",
+    "lib/",
     "bin/"
   ],
   "keywords": [
@@ -30,7 +34,7 @@
     "url": "https://github.com/decoy-run/decoy-scan/issues"
   },
   "scripts": {
-    "test": "node --test test/cli.test.mjs"
+    "test": "node --test test/cli.test.mjs test/unit.test.mjs test/probe.test.mjs"
   },
   "engines": {
     "node": ">=18.0.0"

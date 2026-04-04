@@ -30,8 +30,21 @@ const briefMode = args.includes("--brief");
 const shareMode = args.includes("--share");
 const fixMode = args.includes("--fix");
 const skillsMode = args.includes("--skills");
+const yesMode = args.includes("--yes") || args.includes("-y");
 const policyArg = args.find(a => a.startsWith("--policy="))?.split("=")[1];
 const tokenArg = args.find(a => a.startsWith("--token="))?.split("=")[1] || process.env.DECOY_TOKEN;
+
+// ─── Flag conflicts ───
+
+if (jsonMode && sarifMode) {
+  process.stderr.write("error: --json and --sarif are mutually exclusive\n");
+  process.exit(1);
+}
+
+if (verboseMode && quietMode) {
+  process.stderr.write("error: --verbose and --quiet are mutually exclusive\n");
+  process.exit(1);
+}
 
 // ─── Color support ───
 
@@ -42,7 +55,7 @@ const noColor = args.includes("--no-color") ||
   (!isTTY && !process.env.FORCE_COLOR);
 
 const c = noColor
-  ? { bold: "", dim: "", red: "", green: "", yellow: "", orange: "", cyan: "", magenta: "", reset: "" }
+  ? { bold: "", dim: "", red: "", green: "", yellow: "", orange: "", cyan: "", magenta: "", white: "", underline: "", reset: "" }
   : {
     bold: "\x1b[1m",
     dim: "\x1b[2m",
@@ -52,6 +65,8 @@ const c = noColor
     orange: "\x1b[38;5;208m",
     cyan: "\x1b[36m",
     magenta: "\x1b[35m",
+    white: "\x1b[37m",
+    underline: "\x1b[4m",
     reset: "\x1b[0m",
   };
 
@@ -81,7 +96,7 @@ function spinner(label) {
   return {
     stop(finalMsg) {
       clearInterval(id);
-      process.stderr.write("\r" + " ".repeat(label.length + 10) + "\r");
+      process.stderr.write("\r\x1b[K");
       if (finalMsg) status(finalMsg);
     },
   };
@@ -119,8 +134,10 @@ ${c.bold}Flags:${c.reset}
       --no-probe          Config-only scan — don't spawn servers
       --no-advisories     Skip advisory database lookup
       --report            Upload results to Decoy dashboard
+      --share             Generate a shareable public URL for results
       --skills            Scan Claude Code skills for injection and secrets
       --token string      API token (or set DECOY_TOKEN env var)
+  -y, --yes               Skip confirmation prompts (for CI use)
   -v, --verbose           Show all tools including low-risk
   -q, --quiet             Suppress status output
       --no-color          Disable colored output
@@ -182,7 +199,7 @@ async function main() {
         skills: [],
         owasp: [],
         error: "No MCP configurations found",
-        hint: "Create a config at ~/.claude/settings.json or check https://decoy.run/docs",
+        hint: "Configure an MCP server in your IDE (Claude Desktop, Cursor, VS Code, etc.)\n  Docs: https://decoy.run/docs",
       }));
     } else if (sarifMode) {
       data(JSON.stringify({
@@ -194,7 +211,7 @@ async function main() {
       status(`  ${c.yellow}No MCP configurations found.${c.reset}`);
       status(`  ${c.dim}Checked: Claude Desktop, Cursor, Windsurf, VS Code, Claude Code, Zed, Cline${c.reset}`);
       status("");
-      status(`  ${c.dim}Hint: Create a config at ~/.claude/settings.json or check https://decoy.run/docs${c.reset}`);
+      status(`  ${c.dim}Hint: Configure an MCP server in your IDE (Claude Desktop, Cursor, VS Code, etc.)\n  Docs: https://decoy.run/docs${c.reset}`);
     }
     process.exit(0);
   }
@@ -209,7 +226,7 @@ async function main() {
     ? spinner(noProbe ? "Scanning configs…" : "Probing servers…")
     : { stop() {} };
 
-  const results = await scan({ probe: !noProbe, advisories: !noAdvisories, skills: skillsMode });
+  const results = await scan({ probe: !noProbe, advisories: !noAdvisories, skills: skillsMode, configs });
   sp.stop();
 
   // #4: Explain what --no-probe misses
@@ -217,17 +234,36 @@ async function main() {
     status(`  ${c.dim}Config scan only — run without --no-probe to discover tools and get full analysis.${c.reset}`);
   }
 
+  // Compute exit code based on severity (shared across all output modes)
+  function computeExitCode(results) {
+    const toolCounts = { critical: 0, high: 0 };
+    for (const srv of results.servers) {
+      if (srv.decoy) continue;
+      for (const t of srv.tools) {
+        if (t.risk === "critical") toolCounts.critical++;
+        if (t.risk === "high") toolCounts.high++;
+      }
+    }
+    const nonDecoyPoisoned = results.servers.filter(srv => !srv.decoy).reduce((n, srv) => n + srv.findings.filter(f => f.source === "tool-description").length, 0);
+    const hasToxicFlows = results.toxicFlows?.length > 0;
+    const hasSkillIssues = results.summary.skillIssues > 0;
+    if (toolCounts.critical > 0 || nonDecoyPoisoned > 0 || hasToxicFlows) return 2;
+    if (toolCounts.high > 0 || hasSkillIssues) return 1;
+    return 0;
+  }
+  const scanExitCode = computeExitCode(results);
+
   // Machine output — #3: Add version/tool metadata to JSON
   if (sarifMode) {
     data(JSON.stringify(toSarif(results), null, 2));
     writeScanCache(results);
-    process.exit(0);
+    process.exit(scanExitCode);
   }
   if (briefMode && jsonMode) {
     const s = results.summary;
     const nonDecoyServers = results.servers.filter(srv => !srv.decoy && !srv.error).length;
-    const hasCritical = s.critical > 0 || s.poisoned > 0 || (results.toxicFlows?.length > 0);
-    const hasHigh = s.high > 0 || s.skillIssues > 0;
+    const hasCritical = scanExitCode === 2;
+    const hasHigh = scanExitCode === 1;
     data(JSON.stringify({
       servers: nonDecoyServers,
       critical: s.critical,
@@ -238,12 +274,18 @@ async function main() {
       status: hasCritical ? "fail" : hasHigh ? "warn" : "pass",
     }));
     writeScanCache(results);
-    process.exit(hasCritical ? 2 : hasHigh ? 1 : 0);
+    process.exit(scanExitCode);
   }
   if (jsonMode) {
     data(JSON.stringify({ tool: "decoy-scan", version: VERSION, ...results }, null, 2));
     writeScanCache(results);
-    process.exit(0);
+    process.exit(scanExitCode);
+  }
+
+  // Quiet mode without machine output: exit silently with proper code
+  if (quietMode) {
+    writeScanCache(results);
+    process.exit(scanExitCode);
   }
 
   // ─── Pretty output ───
@@ -452,9 +494,9 @@ async function main() {
     }
     const sp = spinner("Uploading results…");
     try {
-      const resp = await fetch("https://app.decoy.run/api/scan/upload?token=" + tokenArg, {
+      const resp = await fetch("https://app.decoy.run/api/scan/upload", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${tokenArg}` },
         body: JSON.stringify({ results }),
       });
       const d = await resp.json();
@@ -548,6 +590,33 @@ async function main() {
 
   // --share: upload results and get a shareable public URL
   if (shareMode) {
+    if (!yesMode) {
+      const stdinIsTTY = process.stdin.isTTY;
+      if (!stdinIsTTY) {
+        process.stderr.write("error: --share requires --yes flag in non-interactive mode\n");
+        process.exit(1);
+      }
+      process.stderr.write("Warning: --share uploads scan results (server names, tools, findings) to a public URL.\nContinue? [y/N] ");
+      const answer = await new Promise(resolve => {
+        process.stdin.setRawMode?.(false);
+        process.stdin.resume();
+        process.stdin.setEncoding("utf8");
+        let buf = "";
+        const timeout = setTimeout(() => { process.stdin.pause(); resolve(""); }, 30000);
+        process.stdin.on("data", chunk => {
+          buf += chunk;
+          if (buf.includes("\n")) {
+            clearTimeout(timeout);
+            process.stdin.pause();
+            resolve(buf.trim().toLowerCase());
+          }
+        });
+      });
+      if (answer !== "y" && answer !== "yes") {
+        status("  Aborted.");
+        process.exit(0);
+      }
+    }
     const sp = spinner("Generating shareable report…");
     try {
       const payload = {
@@ -657,12 +726,13 @@ async function main() {
 }
 
 // Write scan results to ~/.decoy/scan.json for decoy-tripwire exposure analysis
+const SCAN_CACHE_VERSION = 1;
 function writeScanCache(results) {
   try {
     const cacheDir = join(homedir(), ".decoy");
     mkdirSync(cacheDir, { recursive: true });
-    writeFileSync(join(cacheDir, "scan.json"), JSON.stringify(results, null, 2) + "\n");
-  } catch {}
+    writeFileSync(join(cacheDir, "scan.json"), JSON.stringify({ version: SCAN_CACHE_VERSION, ...results }, null, 2) + "\n");
+  } catch { /* Best-effort cache write — non-critical if ~/.decoy isn't writable */ }
 }
 
 main().catch(e => {
