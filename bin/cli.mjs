@@ -365,6 +365,8 @@ async function main() {
                                 fix: "Audit tool descriptions for hidden instructions — remove any text that overrides agent behavior" },
         "server-command":     { label: "Suspicious server spawn command", tier: "red",
                                 fix: "Replace shell pipes with direct binary execution — avoid sh -c and eval patterns" },
+        "typosquat":          { label: "Possible typosquatted package", tier: "red",
+                                fix: "Verify the package name — compare against the official registry at npmjs.com" },
         "transport":          { label: "Insecure transport (HTTP without TLS)", tier: "red",
                                 fix: "Switch to HTTPS or use stdio transport — never send credentials over plain HTTP" },
         "env-config":         { label: "Secrets exposed via environment variables", tier: "yellow",
