@@ -1,6 +1,6 @@
 {
   "name": "decoy-scan",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Security scanner for MCP server configurations. Finds risky tools, vulnerable packages, and suspicious servers across Claude Desktop, Cursor, VS Code, and more.",
   "type": "module",
   "main": "index.mjs",
