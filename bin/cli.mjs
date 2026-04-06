@@ -247,8 +247,11 @@ async function main() {
     const nonDecoyPoisoned = results.servers.filter(srv => !srv.decoy).reduce((n, srv) => n + srv.findings.filter(f => f.source === "tool-description").length, 0);
     const hasToxicFlows = results.toxicFlows?.length > 0;
     const hasSkillIssues = results.summary.skillIssues > 0;
-    if (toolCounts.critical > 0 || nonDecoyPoisoned > 0 || hasToxicFlows) return 2;
-    if (toolCounts.high > 0 || hasSkillIssues) return 1;
+    // Include static config findings (env exposure, pipe-to-shell, transport) in all output modes
+    const staticCritical = results.servers.filter(srv => !srv.decoy).reduce((n, srv) => n + srv.findings.filter(f => f.severity === "critical").length, 0);
+    const staticHigh = results.servers.filter(srv => !srv.decoy).reduce((n, srv) => n + srv.findings.filter(f => f.severity === "high").length, 0);
+    if (toolCounts.critical > 0 || nonDecoyPoisoned > 0 || hasToxicFlows || staticCritical > 0) return 2;
+    if (toolCounts.high > 0 || staticHigh > 0 || hasSkillIssues) return 1;
     return 0;
   }
   const scanExitCode = computeExitCode(results);
@@ -462,14 +465,11 @@ async function main() {
   const nonDecoyServers = results.servers.filter(s => !s.decoy);
 
   const s = results.summary;
-  // Compute exit from non-decoy tool counts + poisoning + static config findings
-  const nonDecoyPoisoned = results.servers.filter(srv => !srv.decoy).reduce((n, srv) => n + srv.findings.filter(f => f.source === "tool-description").length, 0);
+  const exit = computeExitCode(results);
+  // Compute display counts for summary line (using same data as computeExitCode)
+  const staticCritical = nonDecoyServers.reduce((n, srv) => n + srv.findings.filter(f => f.severity === "critical").length, 0);
+  const staticHigh = nonDecoyServers.reduce((n, srv) => n + srv.findings.filter(f => f.severity === "high").length, 0);
   const hasToxicFlows = results.toxicFlows?.length > 0;
-  const hasSkillIssues = results.summary.skillIssues > 0;
-  // Static config findings (env exposure, pipe-to-shell, transport) affect exit code even on errored servers
-  const staticCritical = results.servers.filter(srv => !srv.decoy).reduce((n, srv) => n + srv.findings.filter(f => f.severity === "critical").length, 0);
-  const staticHigh = results.servers.filter(srv => !srv.decoy).reduce((n, srv) => n + srv.findings.filter(f => f.severity === "high").length, 0);
-  const exit = toolCounts.critical > 0 || nonDecoyPoisoned > 0 || hasToxicFlows || staticCritical > 0 ? 2 : (toolCounts.high > 0 || staticHigh > 0 || hasSkillIssues) ? 1 : 0;
 
   status(`  ${c.dim}${"─".repeat(40)}${c.reset}`);
 
