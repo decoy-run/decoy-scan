@@ -311,46 +311,46 @@ async function main() {
     if (server.error) {
       status(`    ${c.red}Error: ${server.error}${c.reset}`);
       status(`    ${c.dim}Hint: Check the server command and ensure the binary is installed and on your PATH${c.reset}`);
-      status("");
-      continue;
     }
 
-    // Tools — the most important thing. What can this server do?
-    const criticalTools = server.tools.filter(t => t.risk === "critical");
-    const highTools = server.tools.filter(t => t.risk === "high");
-    const mediumTools = server.tools.filter(t => t.risk === "medium");
-    const lowTools = server.tools.filter(t => t.risk === "low");
+    if (!server.error) {
+      // Tools — the most important thing. What can this server do?
+      const criticalTools = server.tools.filter(t => t.risk === "critical");
+      const highTools = server.tools.filter(t => t.risk === "high");
+      const mediumTools = server.tools.filter(t => t.risk === "medium");
+      const lowTools = server.tools.filter(t => t.risk === "low");
 
-    if (criticalTools.length > 0 || highTools.length > 0) hasDangerousTools = true;
+      if (criticalTools.length > 0 || highTools.length > 0) hasDangerousTools = true;
 
-    if (criticalTools.length > 0) {
-      status(`    ${c.red}${c.bold}${criticalTools.map(t => t.name).join(", ")}${c.reset}`);
-    }
-    if (highTools.length > 0) {
-      status(`    ${c.red}${highTools.map(t => t.name).join(", ")}${c.reset}`);
-    }
-    if (mediumTools.length > 0 && verboseMode) {
-      status(`    ${c.yellow}${mediumTools.map(t => t.name).join(", ")}${c.reset}`);
-    }
-    if (verboseMode && lowTools.length > 0) {
-      status(`    ${lowTools.map(t => t.name).join(", ")}`);
-    }
+      if (criticalTools.length > 0) {
+        status(`    ${c.red}${c.bold}${criticalTools.map(t => t.name).join(", ")}${c.reset}`);
+      }
+      if (highTools.length > 0) {
+        status(`    ${c.red}${highTools.map(t => t.name).join(", ")}${c.reset}`);
+      }
+      if (mediumTools.length > 0 && verboseMode) {
+        status(`    ${c.yellow}${mediumTools.map(t => t.name).join(", ")}${c.reset}`);
+      }
+      if (verboseMode && lowTools.length > 0) {
+        status(`    ${lowTools.map(t => t.name).join(", ")}`);
+      }
 
-    // #8: Show medium and low counts separately
-    if (!verboseMode) {
-      const parts = [];
-      if (mediumTools.length > 0) parts.push(`${mediumTools.length} medium`);
-      if (lowTools.length > 0) parts.push(`${lowTools.length} low`);
-      if (parts.length > 0) {
-        status(`    ${c.dim}+ ${parts.join(", ")} risk${c.reset}`);
+      // #8: Show medium and low counts separately
+      if (!verboseMode) {
+        const parts = [];
+        if (mediumTools.length > 0) parts.push(`${mediumTools.length} medium`);
+        if (lowTools.length > 0) parts.push(`${lowTools.length} low`);
+        if (parts.length > 0) {
+          status(`    ${c.dim}+ ${parts.join(", ")} risk${c.reset}`);
+        }
+      }
+
+      if (server.tools.length === 0) {
+        status(`    ${c.dim}No tools discovered${c.reset}`);
       }
     }
 
-    if (server.tools.length === 0) {
-      status(`    ${c.dim}No tools discovered${c.reset}`);
-    }
-
-    // Findings — collapsed by category with human-readable labels.
+    // Findings — always shown, even for errored servers (static checks still run)
     const findings = server.findings;
     if (findings.length > 0) {
       const groups = {};
@@ -457,14 +457,17 @@ async function main() {
     for (const t of srv.tools) toolCounts[t.risk]++;
   }
   const totalTools = toolCounts.critical + toolCounts.high + toolCounts.medium + toolCounts.low;
-  const nonDecoyServers = results.servers.filter(s => !s.decoy && !s.error);
+  const nonDecoyServers = results.servers.filter(s => !s.decoy);
 
   const s = results.summary;
-  // Compute exit from non-decoy tool counts + poisoning
+  // Compute exit from non-decoy tool counts + poisoning + static config findings
   const nonDecoyPoisoned = results.servers.filter(srv => !srv.decoy).reduce((n, srv) => n + srv.findings.filter(f => f.source === "tool-description").length, 0);
   const hasToxicFlows = results.toxicFlows?.length > 0;
   const hasSkillIssues = results.summary.skillIssues > 0;
-  const exit = toolCounts.critical > 0 || nonDecoyPoisoned > 0 || hasToxicFlows ? 2 : (toolCounts.high > 0 || hasSkillIssues) ? 1 : 0;
+  // Static config findings (env exposure, pipe-to-shell, transport) affect exit code even on errored servers
+  const staticCritical = results.servers.filter(srv => !srv.decoy).reduce((n, srv) => n + srv.findings.filter(f => f.severity === "critical").length, 0);
+  const staticHigh = results.servers.filter(srv => !srv.decoy).reduce((n, srv) => n + srv.findings.filter(f => f.severity === "high").length, 0);
+  const exit = toolCounts.critical > 0 || nonDecoyPoisoned > 0 || hasToxicFlows || staticCritical > 0 ? 2 : (toolCounts.high > 0 || staticHigh > 0 || hasSkillIssues) ? 1 : 0;
 
   status(`  ${c.dim}${"─".repeat(40)}${c.reset}`);
 
@@ -472,8 +475,10 @@ async function main() {
     status(`  ${c.green}✓${c.reset} ${c.bold}Clean.${c.reset}  ${c.dim}${nonDecoyServers.length} server${nonDecoyServers.length !== 1 ? "s" : ""}, ${totalTools} tool${totalTools !== 1 ? "s" : ""} — no issues found${c.reset}`);
   } else {
     const parts = [];
-    if (toolCounts.critical > 0) parts.push(`${c.red}${toolCounts.critical} critical${c.reset}`);
-    if (toolCounts.high > 0) parts.push(`${c.red}${toolCounts.high} high${c.reset}`);
+    const totalCritical = toolCounts.critical + staticCritical;
+    const totalHigh = toolCounts.high + staticHigh;
+    if (totalCritical > 0) parts.push(`${c.red}${totalCritical} critical${c.reset}`);
+    if (totalHigh > 0) parts.push(`${c.red}${totalHigh} high${c.reset}`);
     if (toolCounts.medium > 0) parts.push(`${c.yellow}${toolCounts.medium} warning${c.reset}`);
     if (s.poisoned > 0) parts.push(`${c.red}${s.poisoned} poisoned${c.reset}`);
     if (hasToxicFlows) parts.push(`${c.red}${results.toxicFlows.length} toxic flow${results.toxicFlows.length > 1 ? "s" : ""}${c.reset}`);
