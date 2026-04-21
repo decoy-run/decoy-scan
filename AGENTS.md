@@ -5,9 +5,11 @@ MCP supply chain security scanner. Zero dependencies. Node.js >= 18.
 ## Install & Run
 
 ```bash
-npx decoy-scan           # full scan
-npx decoy-scan --json    # machine-readable output
-npx decoy-scan --sarif   # SARIF 2.1.0 for CI/CD
+npx decoy-scan                        # full scan
+npx decoy-scan --json                 # machine-readable output
+npx decoy-scan --sarif                # SARIF 2.1.0 for CI/CD
+npx decoy-scan explain <target>       # explain a tier / category / tool name
+npx decoy-scan explain <target> --json  # structured explanation
 ```
 
 ## What This Tool Does
@@ -71,6 +73,44 @@ import {
 | `--quiet`, `-q` | Suppress status output |
 | `--version`, `-V` | Print version |
 | `--help`, `-h` | Print help |
+
+## `explain` subcommand
+
+For resolving what a scan finding means without parsing the full scan output.
+Useful when an agent sees a finding and needs structured context to act on it.
+
+```bash
+decoy-scan explain critical              # severity tier
+decoy-scan explain tool-description      # finding category
+decoy-scan explain prompt-override       # poisoning type
+decoy-scan explain read_file             # tool name (runs real classifier rules)
+decoy-scan explain list                  # enumerate all explainable targets
+decoy-scan explain <target> --json       # structured output (preferred for agents)
+```
+
+`--json` output shape:
+
+```json
+{
+  "tool": "decoy-scan",
+  "version": "0.5.1",
+  "target": "critical",
+  "result": {
+    "kind": "tier",
+    "key": "critical",
+    "title": "Critical",
+    "summary": "Can execute code, modify data, or cause irreversible changes.",
+    "body": "...",
+    "examples": ["execute_command", "write_file", "..."],
+    "advice": "..."
+  }
+}
+```
+
+`result.kind` is one of `tier`, `category`, `poisoning`, or `tool`. `tool`
+results include `risk`, `reason`, `matched` (the regex that matched by name),
+and a `note` when classification relied on name alone (real scans also use
+the tool description).
 
 ## `--brief` Output Schema
 

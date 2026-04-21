@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.1] - 2026-04-21
+
+### Changed
+- README now documents the `explain` subcommand with examples.
+- AGENTS.md documents `explain` for AI agents, including the `--json` shape
+  and the four `result.kind` values (`tier`, `category`, `poisoning`, `tool`).
+
 ## [0.5.0] - 2026-04-21
 
 ### Added

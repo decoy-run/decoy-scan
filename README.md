@@ -110,6 +110,24 @@ npx decoy-scan --quiet             # Suppress status output (exit code only)
 npx decoy-scan --no-color          # Disable colored output
 ```
 
+## Explain
+
+Ask the scanner why something was flagged, what a tier means, or what a finding
+category is looking for:
+
+```bash
+npx decoy-scan explain critical          # What "critical" means + what to do
+npx decoy-scan explain tool-description  # What a finding category checks
+npx decoy-scan explain prompt-override   # What a poisoning type looks like
+npx decoy-scan explain evaluate_script   # Why a tool was classified the way it was
+npx decoy-scan explain list              # Everything you can explain
+npx decoy-scan explain critical --json   # Structured output for agents
+```
+
+Explanations resolve against the same patterns the scanner uses, so they can't
+drift. `--json` works on every path and is designed for agent consumption in
+Claude Code, Cursor, and anything else with shell access.
+
 Run from your project root to include project-level `.mcp.json` configs.
 
 ## Exit Codes
