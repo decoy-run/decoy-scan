@@ -7,6 +7,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
+import { resolveExplain, listExplainTargets, TIERS, CATEGORIES, POISONING } from "../lib/explain.mjs";
 
 // ─── Version ───
 
@@ -34,6 +35,11 @@ const yesMode = args.includes("--yes") || args.includes("-y");
 const policyArg = args.find(a => a.startsWith("--policy="))?.split("=")[1];
 const tokenArg = args.find(a => a.startsWith("--token="))?.split("=")[1] || process.env.DECOY_TOKEN;
 
+// Positional commands (first non-flag arg).
+const positionals = args.filter(a => !a.startsWith("-") && !a.includes("="));
+const command = positionals[0];
+const commandArg = positionals[1];
+
 // ─── Flag conflicts ───
 
 if (jsonMode && sarifMode) {
@@ -55,10 +61,11 @@ const noColor = args.includes("--no-color") ||
   (!isTTY && !process.env.FORCE_COLOR);
 
 const c = noColor
-  ? { bold: "", dim: "", red: "", green: "", yellow: "", orange: "", cyan: "", magenta: "", white: "", underline: "", reset: "" }
+  ? { bold: "", dim: "", muted: "", red: "", green: "", yellow: "", orange: "", cyan: "", magenta: "", white: "", underline: "", reset: "" }
   : {
     bold: "\x1b[1m",
     dim: "\x1b[2m",
+    muted: "\x1b[38;5;252m",
     red: "\x1b[31m",
     green: "\x1b[32m",
     yellow: "\x1b[33m",
@@ -70,9 +77,11 @@ const c = noColor
     reset: "\x1b[0m",
   };
 
-// 3-tier color: red (act now), yellow (warning), default (info).
-const RISK_COLORS = { critical: c.red, high: c.red, medium: c.yellow, low: "" };
-const RISK_ICONS = { critical: "✗", high: "!", medium: "~", low: " " };
+// Severity colors: red (critical), orange (high), yellow (medium), default (low).
+const RISK_COLORS = { critical: c.red, high: c.orange, medium: c.yellow, low: "" };
+const RISK_ICONS = { critical: "✗", high: "✗", medium: "~", low: " " };
+const POISONED_COLOR = c.magenta;
+const POISONED_ICON = "!";
 
 // ─── Output helpers ───
 
@@ -84,7 +93,38 @@ function data(msg) {
   process.stdout.write(msg + "\n");
 }
 
+// Exit after all queued stdout writes drain. Using process.exit() directly
+// truncates large JSON/SARIF output when stdout is piped, because Node kills
+// the process before the pipe buffer flushes.
+function exitWhenDrained(code) {
+  process.exitCode = code;
+  if (process.stdout.writableLength > 0) {
+    process.stdout.once("drain", () => process.exit(code));
+  } else {
+    // Give the event loop one turn to flush, then exit.
+    setImmediate(() => process.exit(code));
+  }
+}
+
 // ─── Spinner ───
+
+// Wrap a comma-separated list with a hanging indent so continuation lines stay aligned.
+function wrapToolList(names, indent = 4, color = "") {
+  const width = (process.stderr.columns || 80) - indent;
+  const pad = " ".repeat(indent);
+  const lines = [];
+  let line = "";
+  for (let i = 0; i < names.length; i++) {
+    const piece = names[i] + (i < names.length - 1 ? ", " : "");
+    if (line.length + piece.length > width && line.length > 0) {
+      lines.push(line);
+      line = "";
+    }
+    line += piece;
+  }
+  if (line) lines.push(line);
+  return lines.map((l) => `${pad}${color}${l}${color ? c.reset : ""}`).join("\n");
+}
 
 function spinner(label) {
   if (!isTTY || quietMode) return { stop() {} };
@@ -117,6 +157,7 @@ Find security risks in your MCP servers before attackers do.
 
 ${c.bold}Usage:${c.reset}
   decoy-scan [flags]
+  decoy-scan explain <target>     Explain a tier, finding category, or tool name
 
 ${c.bold}Examples:${c.reset}
   npx decoy-scan                          Scan all MCP servers on this machine
@@ -126,6 +167,9 @@ ${c.bold}Examples:${c.reset}
   npx decoy-scan --report --token=xxx     Upload results to Guard dashboard
   npx decoy-scan --verbose                Show all tools including low-risk
   npx decoy-scan --no-probe               Config-only scan (don't spawn servers)
+  npx decoy-scan explain critical         What "critical" means and what to do
+  npx decoy-scan explain evaluate_script  Why a tool was classified the way it was
+  npx decoy-scan explain list             List everything you can explain
 
 ${c.bold}Flags:${c.reset}
       --json              JSON output (stdout, pipeable to jq)
@@ -169,6 +213,107 @@ ${c.bold}Agent integration:${c.reset}
   process.exit(0);
 }
 
+// ─── Explain ───
+
+if (command === "explain") {
+  runExplain(commandArg);
+  exitWhenDrained(0);
+}
+
+function runExplain(target) {
+  if (!target || target === "list") {
+    if (jsonMode) {
+      data(JSON.stringify({ tool: "decoy-scan", version: VERSION, ...listExplainTargets() }, null, 2));
+      return;
+    }
+    status("");
+    status(`  ${c.bold}Things you can explain${c.reset}`);
+    status("");
+    status(`  ${c.muted}Severity tiers${c.reset}`);
+    for (const k of Object.keys(TIERS)) {
+      status(`    ${c.bold}${k}${c.reset}  ${c.muted}${TIERS[k].summary}${c.reset}`);
+    }
+    status("");
+    status(`  ${c.muted}Finding categories${c.reset}`);
+    for (const k of Object.keys(CATEGORIES)) {
+      status(`    ${c.bold}${k}${c.reset}  ${c.muted}${CATEGORIES[k].summary}${c.reset}`);
+    }
+    status("");
+    status(`  ${c.muted}Poisoning types${c.reset}`);
+    for (const k of Object.keys(POISONING)) {
+      status(`    ${c.bold}${k}${c.reset}  ${c.muted}${POISONING[k].summary}${c.reset}`);
+    }
+    status("");
+    status(`  ${c.dim}You can also pass any tool name — e.g. ${c.reset}${c.dim}decoy-scan explain evaluate_script${c.reset}`);
+    status("");
+    return;
+  }
+
+  const result = resolveExplain(target);
+
+  if (jsonMode) {
+    data(JSON.stringify({ tool: "decoy-scan", version: VERSION, target, result }, null, 2));
+    return;
+  }
+
+  const severityColor = { critical: c.red, high: c.orange, medium: c.yellow, low: c.dim };
+
+  status("");
+  if (result.kind === "tier") {
+    status(`  ${severityColor[result.key] || c.bold}${c.bold}${result.title}${c.reset}  ${c.muted}${result.summary}${c.reset}`);
+    status("");
+    status(wrapText(result.body, 2, c.muted));
+    status("");
+    status(`  ${c.bold}Examples${c.reset}  ${c.muted}${result.examples.join(", ")}${c.reset}`);
+    status("");
+    status(wrapText(`What to do: ${result.advice}`, 2, c.muted));
+  } else if (result.kind === "category") {
+    const tc = { red: c.red, yellow: c.yellow, info: c.muted }[result.tier] || c.muted;
+    status(`  ${tc}${c.bold}${result.title}${c.reset}`);
+    status(`  ${c.muted}${result.summary}${c.reset}`);
+    status("");
+    status(wrapText(result.body, 2, c.muted));
+    status("");
+    status(wrapText(`Fix: ${result.fix}`, 2, c.muted));
+  } else if (result.kind === "poisoning") {
+    status(`  ${POISONED_COLOR}${c.bold}${result.title}${c.reset}  ${c.muted}${result.severity}${c.reset}`);
+    status(`  ${c.muted}${result.summary}${c.reset}`);
+    status("");
+    status(wrapText(result.body, 2, c.muted));
+  } else if (result.kind === "tool") {
+    const tc = severityColor[result.risk] || c.muted;
+    status(`  ${c.bold}${result.title}${c.reset}  ${tc}${c.bold}${result.risk}${c.reset}  ${c.muted}(by name)${c.reset}`);
+    status(`  ${c.muted}${result.reason}.${c.reset}`);
+    status("");
+    if (result.note) {
+      status(wrapText(result.note, 2, c.muted));
+      status("");
+    }
+    status(`  ${c.bold}${result.tier.title}${c.reset}  ${c.muted}${result.tier.summary}${c.reset}`);
+    status(wrapText(`What to do: ${result.tier.advice}`, 2, c.muted));
+  }
+  status("");
+}
+
+// Utilities also used by runExplain (defined here so the explain path works
+// before main() runs).
+function wrapText(text, indent = 2, color = "") {
+  const width = Math.max(20, (process.stderr.columns || 80) - indent);
+  const pad = " ".repeat(indent);
+  const words = String(text).split(/\s+/);
+  const lines = [];
+  let line = "";
+  for (const w of words) {
+    if (line.length + w.length + 1 > width && line.length > 0) {
+      lines.push(line);
+      line = "";
+    }
+    line += (line ? " " : "") + w;
+  }
+  if (line) lines.push(line);
+  return lines.map((l) => `${pad}${color}${l}${color ? c.reset : ""}`).join("\n");
+}
+
 // ─── Main ───
 
 async function main() {
@@ -184,7 +329,7 @@ async function main() {
   if (configs.length === 0) {
     if (briefMode && jsonMode) {
       data(JSON.stringify({ servers: 0, critical: 0, high: 0, medium: 0, low: 0, poisoned: 0, status: "pass" }));
-      process.exit(0);
+      return exitWhenDrained(0);
     }
     if (jsonMode) {
       data(JSON.stringify({
@@ -213,7 +358,7 @@ async function main() {
       status("");
       status(`  ${c.dim}Hint: Configure an MCP server in your IDE (Claude Desktop, Cursor, VS Code, etc.)\n  Docs: https://decoy.run/docs${c.reset}`);
     }
-    process.exit(0);
+    return exitWhenDrained(0);
   }
 
   if (!machineMode) {
@@ -226,7 +371,9 @@ async function main() {
     ? spinner(noProbe ? "Scanning configs…" : "Probing servers…")
     : { stop() {} };
 
+  const scanStartedAt = Date.now();
   const results = await scan({ probe: !noProbe, advisories: !noAdvisories, skills: skillsMode, configs });
+  const scanElapsedSec = Math.max(1, Math.round((Date.now() - scanStartedAt) / 1000));
   sp.stop();
 
   // #4: Explain what --no-probe misses
@@ -260,7 +407,7 @@ async function main() {
   if (sarifMode) {
     data(JSON.stringify(toSarif(results), null, 2));
     writeScanCache(results);
-    process.exit(scanExitCode);
+    return exitWhenDrained(scanExitCode);
   }
   if (briefMode && jsonMode) {
     const s = results.summary;
@@ -277,12 +424,12 @@ async function main() {
       status: hasCritical ? "fail" : hasHigh ? "warn" : "pass",
     }));
     writeScanCache(results);
-    process.exit(scanExitCode);
+    return exitWhenDrained(scanExitCode);
   }
   if (jsonMode) {
     data(JSON.stringify({ tool: "decoy-scan", version: VERSION, ...results }, null, 2));
     writeScanCache(results);
-    process.exit(scanExitCode);
+    return exitWhenDrained(scanExitCode);
   }
 
   // Quiet mode without machine output: exit silently with proper code
@@ -297,23 +444,60 @@ async function main() {
   const hasDecoy = results.servers.some(s => s.decoy);
   let hasDangerousTools = false;
 
+  // Progress recap (shown after scan completes).
+  const nonDecoyServerCount = results.servers.filter(s => !s.decoy).length;
+  const totalToolsChecked = results.servers
+    .filter(s => !s.decoy)
+    .reduce((n, s) => n + s.tools.length, 0);
+  const totalChecks = totalToolsChecked + nonDecoyServerCount;
+  status(`  ${c.dim}▸${c.reset} Discovering MCP servers… ${c.bold}${nonDecoyServerCount} found${c.reset}`);
+  status(`  ${c.dim}▸${c.reset} Running ${c.bold}${totalChecks}${c.reset} checks…`);
+  status("");
+
+  // Severity legend — shown once if any server has findings.
+  const hasAnyFindings = results.servers.some(s =>
+    !s.decoy && (s.tools.some(t => t.risk !== "low") || s.findings.length > 0)
+  );
+  if (hasAnyFindings) {
+    status(`  ${c.muted}Severity:${c.reset}  ${c.red}${c.bold}Critical${c.reset} ${c.dim}code exec / data mod${c.reset}  ${c.orange}High${c.reset} ${c.dim}file / network / creds${c.reset}  ${c.yellow}Medium${c.reset} ${c.dim}info / read-only${c.reset}`);
+    status("");
+  }
+
+  // Per-server badge: picks the most severe signal for the header line.
+  function serverBadge(server) {
+    if (server.error) return { color: c.yellow, icon: "?", label: "probe failed" };
+    const crit = server.tools.filter(t => t.risk === "critical").length
+      + server.findings.filter(f => f.severity === "critical").length;
+    const high = server.tools.filter(t => t.risk === "high").length
+      + server.findings.filter(f => f.severity === "high").length;
+    const poisoned = server.findings.filter(f => f.source === "tool-description").length;
+    if (crit > 0) return { color: c.red, icon: "✗", label: `${crit} critical` };
+    if (poisoned > 0) return { color: POISONED_COLOR, icon: POISONED_ICON, label: "poisoned tool" };
+    if (high > 0) return { color: c.orange, icon: "✗", label: `${high} high` };
+    const med = server.tools.filter(t => t.risk === "medium").length;
+    if (med > 0) return { color: c.yellow, icon: "~", label: `${med} medium` };
+    return { color: c.green, icon: "✓", label: "passed" };
+  }
+
+  const shownDecoy = new Set();
   for (const server of results.servers) {
-    // #1: Decoy tripwire server — show as active protection, not a threat
+    // #1: Decoy tripwire server — show as active protection, not a threat.
+    // Same decoy server may be configured in multiple hosts; only show it once.
     if (server.decoy) {
+      if (shownDecoy.has(server.name)) continue;
+      shownDecoy.add(server.name);
       status(`  ${c.green}✓${c.reset} ${c.bold}${server.name}${c.reset}  ${c.dim}Tripwires active${c.reset}`);
       status("");
       continue;
     }
 
-    const riskColor = RISK_COLORS[server.risk] || "";
-    const icon = RISK_ICONS[server.risk] || " ";
-    const hostStr = server.hosts.join(", ");
+    const badge = serverBadge(server);
 
-    status(`  ${riskColor}${icon}${c.reset} ${c.bold}${server.name}${c.reset}  ${c.dim}${hostStr}${c.reset}`);
+    status(`  ${badge.color}${badge.icon}${c.reset} ${c.bold}${server.name}${c.reset}  ${badge.color}${badge.label}${c.reset}`);
 
     if (server.error) {
-      status(`    ${c.red}Error: ${server.error}${c.reset}`);
-      status(`    ${c.dim}Hint: Check the server command and ensure the binary is installed and on your PATH${c.reset}`);
+      status(wrapText(`Error: ${server.error}`, 4, c.red));
+      status(wrapText(`Hint: Check the server command and ensure the binary is installed and on your PATH`, 4, c.muted));
     }
 
     if (!server.error) {
@@ -326,16 +510,19 @@ async function main() {
       if (criticalTools.length > 0 || highTools.length > 0) hasDangerousTools = true;
 
       if (criticalTools.length > 0) {
-        status(`    ${c.red}${c.bold}${criticalTools.map(t => t.name).join(", ")}${c.reset}`);
+        status(`    ${c.red}${c.bold}Critical${c.reset}`);
+        status(wrapToolList(criticalTools.map(t => t.name), 6, c.red + c.bold));
       }
       if (highTools.length > 0) {
-        status(`    ${c.red}${highTools.map(t => t.name).join(", ")}${c.reset}`);
+        status(`    ${c.orange}High${c.reset}`);
+        status(wrapToolList(highTools.map(t => t.name), 6, c.orange));
       }
       if (mediumTools.length > 0 && verboseMode) {
-        status(`    ${c.yellow}${mediumTools.map(t => t.name).join(", ")}${c.reset}`);
+        status(`    ${c.yellow}Medium${c.reset}`);
+        status(wrapToolList(mediumTools.map(t => t.name), 6, c.yellow));
       }
-      if (verboseMode && lowTools.length > 0) {
-        status(`    ${lowTools.map(t => t.name).join(", ")}`);
+      if (lowTools.length > 0 && verboseMode) {
+        status(`    ${c.dim}Low (${lowTools.length})${c.reset}`);
       }
 
       // #8: Show medium and low counts separately
@@ -386,7 +573,7 @@ async function main() {
                                 fix: "Review the diff — new tools may introduce unintended capabilities" },
       };
 
-      const tierColor = { red: c.red, yellow: c.yellow, info: c.dim };
+      const tierColor = { red: c.red, yellow: c.yellow, info: c.muted };
 
       for (const [source, items] of Object.entries(groups)) {
         const info = categoryInfo[source] || { label: source, tier: "info" };
@@ -451,9 +638,6 @@ async function main() {
     }
   }
 
-  if (hasDangerousTools) {
-    status(`  ${c.dim}critical = code exec, file write, payments · high = file read, network, credentials${c.reset}`);
-  }
 
   // #7: Summary uses tool-level counts, not server-level
   const toolCounts = { critical: 0, high: 0, medium: 0, low: 0 };
@@ -473,20 +657,24 @@ async function main() {
 
   status(`  ${c.dim}${"─".repeat(40)}${c.reset}`);
 
+  const totalCritical = toolCounts.critical + staticCritical;
+  const totalHigh = toolCounts.high + staticHigh;
+  const issuesFound = totalCritical + totalHigh + s.poisoned
+    + (hasToxicFlows ? results.toxicFlows.length : 0)
+    + (s.skillIssues || 0);
+  const checksPassed = Math.max(0, totalChecks - issuesFound);
+
   if (exit === 0) {
-    status(`  ${c.green}✓${c.reset} ${c.bold}Clean.${c.reset}  ${c.dim}${nonDecoyServers.length} server${nonDecoyServers.length !== 1 ? "s" : ""}, ${totalTools} tool${totalTools !== 1 ? "s" : ""} — no issues found${c.reset}`);
+    status(`  ${c.green}✓${c.reset} ${c.bold}Clean.${c.reset}  ${c.dim}${checksPassed} checks passed · ${scanElapsedSec}s${c.reset}`);
   } else {
-    const parts = [];
-    const totalCritical = toolCounts.critical + staticCritical;
-    const totalHigh = toolCounts.high + staticHigh;
-    if (totalCritical > 0) parts.push(`${c.red}${totalCritical} critical${c.reset}`);
-    if (totalHigh > 0) parts.push(`${c.red}${totalHigh} high${c.reset}`);
-    if (toolCounts.medium > 0) parts.push(`${c.yellow}${toolCounts.medium} warning${c.reset}`);
-    if (s.poisoned > 0) parts.push(`${c.red}${s.poisoned} poisoned${c.reset}`);
-    if (hasToxicFlows) parts.push(`${c.red}${results.toxicFlows.length} toxic flow${results.toxicFlows.length > 1 ? "s" : ""}${c.reset}`);
-    if (s.skillIssues > 0) parts.push(`${c.red}${s.skillIssues} skill issue${s.skillIssues > 1 ? "s" : ""}${c.reset}`);
-    status(`  ${c.red}✗${c.reset} ${parts.join(", ")}  ${c.dim}across ${nonDecoyServers.length} server${nonDecoyServers.length !== 1 ? "s" : ""}, ${totalTools} tool${totalTools !== 1 ? "s" : ""}${c.reset}`);
-    status(`  ${c.dim}  Better to find it here than in prod.${c.reset}`);
+    const breakdown = [];
+    if (totalCritical > 0) breakdown.push(`${c.red}${totalCritical} critical${c.reset}`);
+    if (totalHigh > 0) breakdown.push(`${c.orange}${totalHigh} high${c.reset}`);
+    if (s.poisoned > 0) breakdown.push(`${POISONED_COLOR}${s.poisoned} poisoned${c.reset}`);
+    if (hasToxicFlows) breakdown.push(`${c.red}${results.toxicFlows.length} toxic flow${results.toxicFlows.length > 1 ? "s" : ""}${c.reset}`);
+    if (s.skillIssues > 0) breakdown.push(`${c.red}${s.skillIssues} skill issue${s.skillIssues > 1 ? "s" : ""}${c.reset}`);
+    status(`  ${c.bold}${issuesFound} issues found${c.reset}  ${breakdown.join(`${c.dim}, ${c.reset}`)}  ${c.dim}· ${checksPassed} checks passed · ${scanElapsedSec}s${c.reset}`);
+    status(`  ${c.muted}  Review these in your MCP host and install tripwires below to catch exploitation.${c.reset}`);
   }
 
   // Upload

@@ -425,3 +425,88 @@ describe("new features in JSON output", () => {
     assert.ok(stdout.includes('"skills"'), "JSON should contain skills field");
   });
 });
+
+// ─── Explain subcommand ───
+
+describe("explain", () => {
+  it("explain list shows all explainable targets", async () => {
+    const { stderr, exitCode } = await run(["explain", "list"]);
+    assert.equal(exitCode, 0);
+    assert.match(stderr, /Severity tiers/);
+    assert.match(stderr, /Finding categories/);
+    assert.match(stderr, /Poisoning types/);
+    assert.match(stderr, /critical/);
+    assert.match(stderr, /tool-description/);
+  });
+
+  it("explain with no target falls through to list", async () => {
+    const { stderr, exitCode } = await run(["explain"]);
+    assert.equal(exitCode, 0);
+    assert.match(stderr, /Things you can explain/);
+  });
+
+  it("explain <tier> returns tier content", async () => {
+    const { stderr, exitCode } = await run(["explain", "critical"]);
+    assert.equal(exitCode, 0);
+    assert.match(stderr, /Critical/);
+    assert.match(stderr, /execute code/);
+    assert.match(stderr, /What to do/);
+  });
+
+  it("explain <category> returns category content", async () => {
+    const { stderr, exitCode } = await run(["explain", "tool-description"]);
+    assert.equal(exitCode, 0);
+    assert.match(stderr, /Prompt injection/);
+    assert.match(stderr, /Fix:/);
+  });
+
+  it("explain <poisoning-type> returns poisoning content", async () => {
+    const { stderr, exitCode } = await run(["explain", "prompt-override"]);
+    assert.equal(exitCode, 0);
+    assert.match(stderr, /Prompt Override/);
+  });
+
+  it("explain <known-critical-tool-name> classifies critical", async () => {
+    const { stderr, exitCode } = await run(["explain", "execute_command"]);
+    assert.equal(exitCode, 0);
+    assert.match(stderr, /critical/);
+    assert.match(stderr, /by name/);
+    assert.match(stderr, /critical-tier pattern/);
+  });
+
+  it("explain <unknown-tool-name> falls through with caveat", async () => {
+    const { stderr, exitCode } = await run(["explain", "some_unknown_tool_xyz"]);
+    assert.equal(exitCode, 0);
+    assert.match(stderr, /low/);
+    assert.match(stderr, /description is also checked/);
+  });
+
+  it("explain --json returns structured data", async () => {
+    const { stdout, exitCode } = await run(["explain", "critical", "--json"]);
+    assert.equal(exitCode, 0);
+    const result = JSON.parse(stdout);
+    assert.equal(result.target, "critical");
+    assert.equal(result.result.kind, "tier");
+    assert.equal(result.result.key, "critical");
+    assert.ok(Array.isArray(result.result.examples));
+    assert.ok(result.result.advice);
+  });
+
+  it("explain list --json returns all target keys", async () => {
+    const { stdout, exitCode } = await run(["explain", "list", "--json"]);
+    assert.equal(exitCode, 0);
+    const result = JSON.parse(stdout);
+    assert.ok(Array.isArray(result.tiers));
+    assert.ok(Array.isArray(result.categories));
+    assert.ok(Array.isArray(result.poisoning));
+    assert.ok(result.tiers.includes("critical"));
+  });
+
+  it("explain subcommand does not trigger a scan", async () => {
+    // An explain run should complete far faster than a full scan.
+    const start = Date.now();
+    await run(["explain", "critical"]);
+    const elapsed = Date.now() - start;
+    assert.ok(elapsed < 3000, `explain took ${elapsed}ms — should be near-instant`);
+  });
+});
