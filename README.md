@@ -1,24 +1,64 @@
-# decoy-scan
+<p align="center">
+  <a href="https://decoy.run?utm_source=github&utm_medium=scan_readme" target="_blank" rel="noopener noreferrer">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/decoy-run/decoy-scan/main/.github/assets/logomark-dark.svg">
+      <img src="https://raw.githubusercontent.com/decoy-run/decoy-scan/main/.github/assets/logomark-light.svg" height="48">
+    </picture>
+  </a>
+  <br />
+</p>
+<h1 align="center">
+  Decoy Scan
+</h1>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/decoy-scan"><img alt="npm" src="https://img.shields.io/npm/v/decoy-scan?color=111827&labelColor=111827"></a>
+  <a href="https://decoy.run/docs?utm_source=github&utm_medium=scan_readme"><img alt="documentation" src="https://img.shields.io/badge/documentation-decoy-111827?labelColor=111827"></a>
+  <a href="https://decoy.run/changelog?utm_source=github&utm_medium=scan_readme"><img alt="changelog" src="https://img.shields.io/badge/changelog-latest-111827?labelColor=111827"></a>
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-111827?labelColor=111827"></a>
+</p>
 
 Find security risks in your MCP servers before attackers do. Zero dependencies, zero config, zero account required.
 
-[![npm](https://img.shields.io/npm/v/decoy-scan)](https://www.npmjs.com/package/decoy-scan)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+Scans Claude Desktop, Cursor, Windsurf, VS Code, Claude Code, Zed, and Cline. Finds risky tools, detects prompt injection, analyzes toxic data flows, tracks manifest changes, and maps everything to the OWASP Agentic Top 10.
+
+**Works with:** Claude Desktop, Cursor, Windsurf, VS Code, Claude Code, Zed, Cline
+
+## 🚀 Get Started
 
 ```bash
 npx decoy-scan
 ```
 
-Scans Claude Desktop, Cursor, Windsurf, VS Code, Claude Code, Zed, and Cline. Finds risky tools, detects prompt injection, analyzes toxic data flows, tracks manifest changes, and maps everything to the OWASP Agentic Top 10.
+That's it. No install, no account, no config. Runs against every MCP host it finds on the machine and prints the risk picture.
 
-## What It Checks
+## 🧑‍💻 Install
+
+No install required — run directly with `npx`. Requires Node.js 18+.
+
+Or pin it in CI:
+
+```yaml
+- uses: decoy-run/decoy-scan@v1
+  with:
+    policy: no-critical,no-poisoning,no-toxic-flows
+    report: true
+    token: ${{ secrets.DECOY_TOKEN }}
+```
+
+## 🎓 Docs
+
+- [Overview](https://decoy.run/docs/scan/overview)
+- [OWASP Top 10 for Agentic Applications 2026](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/)
+
+## 🔍 What it checks
 
 | Check | What it finds |
 |-------|---------------|
 | Tool risk classification | Critical/high/medium/low tools by name + description |
 | Prompt injection detection | 37 patterns across 20 attack categories in tool descriptions |
 | Toxic flow analysis | Cross-server data leak (TF001) and destructive (TF002) attack chains |
-| Tool manifest hashing | Detects tool additions, removals, and description changes between scans |
+| Tool manifest hashing | Tool additions, removals, and description changes between scans |
 | Skill scanning | Prompt injection, hardcoded secrets, suspicious URLs in Claude Code skills |
 | Server command analysis | Pipe-to-shell, inline code, typosquatting, temp directory spawning |
 | Environment variable exposure | API keys, tokens, secrets, cloud credentials passed to servers |
@@ -28,7 +68,7 @@ Scans Claude Desktop, Cursor, Windsurf, VS Code, Claude Code, Zed, and Cline. Fi
 | Permission scope | Over-privileged servers, dangerous capability combinations |
 | OWASP mapping | Every finding mapped to ASI01–ASI05 |
 
-## GitHub Action
+## 🤖 GitHub Action
 
 One step. Scans MCP configs, enforces policy, uploads results to GitHub Security tab.
 
@@ -47,17 +87,7 @@ jobs:
       - uses: decoy-run/decoy-scan@v1
 ```
 
-That's it. Fails the build if critical tools or prompt injection are found. Results appear in the Security tab.
-
-### With options
-
-```yaml
-- uses: decoy-run/decoy-scan@v1
-  with:
-    policy: no-critical,no-poisoning,no-toxic-flows
-    report: true
-    token: ${{ secrets.DECOY_TOKEN }}
-```
+Fails the build on critical tools or prompt injection. Results appear in the Security tab.
 
 ### Inputs
 
@@ -94,7 +124,7 @@ If you prefer raw commands over the Action:
     sarif_file: results.sarif
 ```
 
-## Options
+## 🛠 Options
 
 ```bash
 npx decoy-scan                     # Full scan with server probing
@@ -110,10 +140,9 @@ npx decoy-scan --quiet             # Suppress status output (exit code only)
 npx decoy-scan --no-color          # Disable colored output
 ```
 
-## Explain
+## 💡 Explain
 
-Ask the scanner why something was flagged, what a tier means, or what a finding
-category is looking for:
+Ask the scanner why something was flagged, what a tier means, or what a finding category is looking for:
 
 ```bash
 npx decoy-scan explain critical          # What "critical" means + what to do
@@ -124,13 +153,11 @@ npx decoy-scan explain list              # Everything you can explain
 npx decoy-scan explain critical --json   # Structured output for agents
 ```
 
-Explanations resolve against the same patterns the scanner uses, so they can't
-drift. `--json` works on every path and is designed for agent consumption in
-Claude Code, Cursor, and anything else with shell access.
+Explanations resolve against the same patterns the scanner uses, so they can't drift. `--json` works on every path and is designed for agent consumption in Claude Code, Cursor, and anything else with shell access.
 
 Run from your project root to include project-level `.mcp.json` configs.
 
-## Exit Codes
+## 🏁 Exit codes
 
 | Code | Meaning |
 |------|---------|
@@ -138,7 +165,7 @@ Run from your project root to include project-level `.mcp.json` configs.
 | `1` | High-risk issues found |
 | `2` | Critical issues, tool poisoning, toxic flows, or policy violation |
 
-## Library
+## 📚 Library
 
 ```javascript
 import {
@@ -159,7 +186,7 @@ console.log(results.skills);        // [{ name: "...", findings: [...] }]
 console.log(results.servers[0].manifestHash);  // "45c4c571f03c78a2"
 ```
 
-## How It Compares
+## ⚖ How it compares
 
 | | decoy-scan | Snyk agent-scan |
 |---|---|---|
@@ -176,16 +203,20 @@ console.log(results.servers[0].manifestHash);  // "45c4c571f03c78a2"
 | Hosts supported | **8** | 6 |
 | Tripwire integration | **Yes (decoy-tripwire)** | No |
 
-## Supported Hosts
+## 🚢 Release Notes
 
-Claude Desktop, Cursor, Windsurf, VS Code, Claude Code (global + project), Zed, Cline
+See [CHANGELOG.md](CHANGELOG.md) or the [hosted changelog](https://decoy.run/changelog).
 
-## Related
+## 🤝 Contribute
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) if present.
+
+## 🔗 Related
 
 - [decoy-tripwire](https://npmjs.com/package/decoy-tripwire) — Tripwire tools that detect when agents are compromised
+- [decoy-redteam](https://npmjs.com/package/decoy-redteam) — Autonomous red team for MCP servers
 - [Decoy Guard](https://decoy.run) — Dashboard, threat intel, compliance reports
-- [OWASP Agentic Top 10](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/)
 
-## License
+## 📝 License
 
-MIT
+MIT — see [LICENSE](LICENSE).
