@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.4] - 2026-04-25
+
+### Fixed
+- `explain --json` no longer appends a second JSON payload to stdout when
+  no MCP configurations are present. The CLI was falling through from the
+  `explain` branch into `main()` because `exitWhenDrained()` defers the
+  actual exit; added a guard so `main()` only runs when no subcommand
+  matched. Surfaced as test failures on Node 22 in CI.
+
 ## [0.5.1] - 2026-04-21
 
 ### Changed
