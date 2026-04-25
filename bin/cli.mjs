@@ -930,9 +930,15 @@ function writeScanCache(results) {
   } catch { /* Best-effort cache write — non-critical if ~/.decoy isn't writable */ }
 }
 
-main().catch(e => {
-  status(`  ${c.red}error:${c.reset} ${e.message}`);
-  if (verboseMode) status(`  ${c.dim}${e.stack}${c.reset}`);
-  status(`  ${c.dim}Hint: Run with --verbose for full stack trace, or report at https://github.com/decoy-run/decoy-scan/issues${c.reset}`);
-  process.exit(1);
-});
+// `explain` is handled inline above and uses exitWhenDrained() to flush
+// stdout before exiting. Without this guard, execution falls through to
+// main() and a second JSON payload gets appended to stdout before the
+// deferred exit fires — corrupting `--json` output on fast hosts.
+if (command !== "explain") {
+  main().catch(e => {
+    status(`  ${c.red}error:${c.reset} ${e.message}`);
+    if (verboseMode) status(`  ${c.dim}${e.stack}${c.reset}`);
+    status(`  ${c.dim}Hint: Run with --verbose for full stack trace, or report at https://github.com/decoy-run/decoy-scan/issues${c.reset}`);
+    process.exit(1);
+  });
+}
