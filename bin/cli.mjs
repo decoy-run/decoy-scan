@@ -7,7 +7,12 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
+import { spawn } from "node:child_process";
+import readline from "node:readline";
 import { resolveExplain, listExplainTargets, TIERS, CATEGORIES, POISONING } from "../lib/explain.mjs";
+
+// Persisted token location — written by `login`, read by --report.
+const TOKEN_FILE = join(homedir(), ".decoy", "token");
 
 // ─── Version ───
 
@@ -33,7 +38,13 @@ const fixMode = args.includes("--fix");
 const skillsMode = args.includes("--skills");
 const yesMode = args.includes("--yes") || args.includes("-y");
 const policyArg = args.find(a => a.startsWith("--policy="))?.split("=")[1];
-const tokenArg = args.find(a => a.startsWith("--token="))?.split("=")[1] || process.env.DECOY_TOKEN;
+function loadStoredToken() {
+  try {
+    const t = readFileSync(TOKEN_FILE, "utf8").trim();
+    return t.length >= 16 ? t : null;
+  } catch { return null; }
+}
+const tokenArg = args.find(a => a.startsWith("--token="))?.split("=")[1] || process.env.DECOY_TOKEN || loadStoredToken();
 
 // Positional commands (first non-flag arg).
 const positionals = args.filter(a => !a.startsWith("-") && !a.includes("="));
@@ -142,6 +153,65 @@ function spinner(label) {
   };
 }
 
+// ─── Interactive sign-in ───
+
+function openBrowser(url) {
+  const cmd = process.platform === "darwin" ? "open"
+    : process.platform === "win32" ? "cmd"
+    : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  try {
+    spawn(cmd, args, { stdio: "ignore", detached: true }).unref();
+    return true;
+  } catch { return false; }
+}
+
+function prompt(question) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
+
+function saveStoredToken(token) {
+  mkdirSync(dirname(TOKEN_FILE), { recursive: true });
+  writeFileSync(TOKEN_FILE, token + "\n", { mode: 0o600 });
+}
+
+// Walks the user through sign-in: opens browser, prompts for token paste,
+// saves it. Returns the token on success, null if the user bailed.
+async function loginInteractive() {
+  const url = "https://app.decoy.run/dashboard";
+  status("");
+  status(`  ${c.bold}Sign in to Decoy${c.reset}`);
+  status(`  ${c.muted}Free, ~30 seconds. Email-only — no card, no password.${c.reset}`);
+  status("");
+  status(`  ${c.dim}1.${c.reset} Opening ${c.cyan}${url}${c.reset}`);
+  openBrowser(url);
+  status(`  ${c.dim}2.${c.reset} Sign in (or sign up if it's your first time)`);
+  status(`  ${c.dim}3.${c.reset} Copy your token from the dashboard`);
+  status("");
+
+  const token = await prompt(`  Paste your token: `);
+
+  if (!token) {
+    status("");
+    status(`  ${c.dim}Cancelled. Re-run when you're ready.${c.reset}`);
+    return null;
+  }
+  if (token.length < 16) {
+    status(`  ${c.red}That doesn't look like a valid token (too short).${c.reset}`);
+    return null;
+  }
+
+  saveStoredToken(token);
+  status(`  ${c.green}✓${c.reset} ${c.dim}Saved to ~/.decoy/token. You won't need to do this again.${c.reset}`);
+  return token;
+}
+
 // ─── Version ───
 
 if (versionMode) {
@@ -158,13 +228,15 @@ Find security risks in your MCP servers before attackers do.
 ${c.bold}Usage:${c.reset}
   decoy-scan [flags]
   decoy-scan explain <target>     Explain a tier, finding category, or tool name
+  decoy-scan login                Sign in and store a token at ~/.decoy/token
 
 ${c.bold}Examples:${c.reset}
   npx decoy-scan                          Scan all MCP servers on this machine
   npx decoy-scan --json                   Machine-readable JSON output
   npx decoy-scan --json | jq '.summary'   Just the summary
   npx decoy-scan --sarif > scan.sarif     SARIF for GitHub Security tab
-  npx decoy-scan --report --token=xxx     Upload results to Guard dashboard
+  npx decoy-scan login                    Sign in once, then --report works
+  npx decoy-scan --report                 Upload results to dashboard (after login)
   npx decoy-scan --verbose                Show all tools including low-risk
   npx decoy-scan --no-probe               Config-only scan (don't spawn servers)
   npx decoy-scan explain critical         What "critical" means and what to do
@@ -211,6 +283,13 @@ ${c.bold}Agent integration:${c.reset}
   Use --json for structured output. Use --brief for minimal summaries.
 `);
   process.exit(0);
+}
+
+// ─── Login ───
+
+if (command === "login") {
+  const token = await loginInteractive();
+  process.exit(token ? 0 : 1);
 }
 
 // ─── Explain ───
@@ -679,19 +758,24 @@ async function main() {
 
   // Upload
   if (reportMode) {
-    if (!tokenArg) {
+    let token = tokenArg;
+    if (!token) {
       status("");
-      status(`  ${c.red}--report requires a token.${c.reset}`);
-      status(`  ${c.dim}Hint: Pass --token=YOUR_TOKEN or set DECOY_TOKEN in your environment.${c.reset}`);
-      status(`  ${c.dim}Sign up at https://app.decoy.run to get a token.${c.reset}`);
-      status("");
-      process.exit(1);
+      status(`  ${c.muted}--report uploads results to your dashboard for history, threat-intel matching,${c.reset}`);
+      status(`  ${c.muted}and trend tracking. You'll need to sign in once.${c.reset}`);
+      const answer = yesMode ? "y" : await prompt(`  Sign in now? [Y/n] `);
+      if (answer && /^n/i.test(answer)) {
+        status(`  ${c.dim}Skipped. Run ${c.reset}${c.dim}npx decoy-scan login${c.reset}${c.dim} when you're ready.${c.reset}`);
+        process.exit(1);
+      }
+      token = await loginInteractive();
+      if (!token) process.exit(1);
     }
     const sp = spinner("Uploading results…");
     try {
       const resp = await fetch("https://app.decoy.run/api/scan/upload", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${tokenArg}` },
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
         body: JSON.stringify({ results }),
       });
       const d = await resp.json();
@@ -710,22 +794,35 @@ async function main() {
     }
   }
 
-  // Next steps — context-aware based on whether decoy-tripwire is installed
+  // Next steps — helpful first, severity-aware. Order: understand → prevent → track.
+  // Skip entirely when --report just succeeded (we already gave them a dashboard URL).
   status("");
-  if (exit !== 0) {
-    if (hasDecoy) {
-      status(`  ${c.dim}$${c.reset} npx decoy-tripwire watch    ${c.dim}# Watch triggers in real time${c.reset}`);
-      status(`  ${c.dim}$${c.reset} npx decoy-tripwire status   ${c.dim}# Check recent triggers${c.reset}`);
-      status(`  ${c.dim}$${c.reset} npx decoy-scan --report     ${c.dim}# Track over time in dashboard${c.reset}`);
-    } else {
-      status(`  ${c.dim}Scanning found the risk. Tripwires catch when it's exploited.${c.reset}`);
-      status("");
-      status(`  ${c.dim}$${c.reset} npx decoy-tripwire init     ${c.dim}# Install tripwires (2 min)${c.reset}`);
-      status(`  ${c.dim}$${c.reset} npx decoy-scan --sarif      ${c.dim}# Export for CI/CD${c.reset}`);
-      status(`  ${c.dim}$${c.reset} npx decoy-scan --report     ${c.dim}# Track over time in dashboard${c.reset}`);
-    }
-  } else {
-    status(`  ${c.dim}$${c.reset} npx decoy-scan --report     ${c.dim}# Track over time in dashboard${c.reset}`);
+  const hasHighRisk = totalCritical + totalHigh > 0;
+  const hasIssues = exit !== 0;
+  const hideReportLine = reportMode && tokenArg;
+
+  if (hasIssues) {
+    status(`  ${c.dim}$${c.reset} npx decoy-scan explain <finding>   ${c.dim}# What it means and how to fix${c.reset}`);
+  }
+
+  if (!hasDecoy) {
+    const why = hasHighRisk
+      ? "Catch attempts to exploit these tools as they happen"
+      : hasIssues
+        ? "Watch for what scans miss — runtime injection, tool drift"
+        : "Catch silent compromise if your setup changes";
+    status(`  ${c.dim}$${c.reset} npx decoy-tripwire init             ${c.dim}# ${why} (free, 2 min)${c.reset}`);
+  } else if (hasIssues) {
+    status(`  ${c.dim}$${c.reset} npx decoy-tripwire watch            ${c.dim}# Live trigger feed${c.reset}`);
+  }
+
+  if (!hideReportLine) {
+    const reportNote = tokenArg ? "Track findings over time" : "Track findings over time (free signup)";
+    status(`  ${c.dim}$${c.reset} npx decoy-scan --report             ${c.dim}# ${reportNote}${c.reset}`);
+  }
+
+  if (!hasIssues && hasDecoy) {
+    status(`  ${c.green}✓${c.reset} ${c.dim}Clean scan, tripwires active. You're set.${c.reset}`);
   }
 
   // CI/CD policy gate
@@ -934,7 +1031,7 @@ function writeScanCache(results) {
 // stdout before exiting. Without this guard, execution falls through to
 // main() and a second JSON payload gets appended to stdout before the
 // deferred exit fires — corrupting `--json` output on fast hosts.
-if (command !== "explain") {
+if (command !== "explain" && command !== "login") {
   main().catch(e => {
     status(`  ${c.red}error:${c.reset} ${e.message}`);
     if (verboseMode) status(`  ${c.dim}${e.stack}${c.reset}`);
