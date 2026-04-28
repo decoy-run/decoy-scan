@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.6] - 2026-04-28
+
+### Added
+- `--json` and `--brief` output now includes an `exitCode` field so agents
+  consuming the JSON don't have to re-derive severity from `summary` counts.
+  Matches the process exit code (0/1/2) defined in `--help`.
+
+### Changed
+- `--brief` now implies `--json` (it has always been a JSON-only form per
+  `--help`). Previously `--brief` alone produced no stdout — agents had to
+  remember to also pass `--json` for the brief summary to surface.
+
+### Fixed
+- `classifyTool` and `explain <tool>` were anchoring every name pattern,
+  so suffixed code-execution names slipped through to "low" — most
+  visibly `evaluate_script` (the one shipped by `chrome-devtools` MCP),
+  plus `eval_code`, `execute_script`, `execute_python`, `run_javascript`,
+  `run_sql`, etc. Two changes:
+  - Added `^eval[_-]?(script|code)$`, `^evaluate[_-]?(script|code)$`,
+    `^execute[_-]?(script|code|js|javascript|python|sql)$`,
+    `^run[_-]?(script|code|js|javascript|python|sql)$` to the critical
+    tier in `RISK_PATTERNS`.
+  - The substring fallback (previously description-only) now also runs
+    against the lowercased name, so risky verbs like `evaluate`,
+    `spawn`, `fetch` classify correctly even when no description is
+    provided. Tested in `unit.test.mjs` and `cli.test.mjs`.
+
 ## [0.5.4] - 2026-04-25
 
 ### Fixed

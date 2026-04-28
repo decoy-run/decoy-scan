@@ -64,7 +64,7 @@ import {
 |------|-------------|
 | `--json` | JSON output (machine-readable) |
 | `--sarif` | SARIF 2.1.0 output (GitHub Security, VS Code) |
-| `--brief` | Minimal JSON summary (use with `--json`) |
+| `--brief` | Minimal JSON summary (implies `--json`) |
 | `--no-probe` | Config-only scan (don't spawn servers) |
 | `--no-advisories` | Skip Decoy advisory database check |
 | `--share` | Generate a shareable public URL for results |
@@ -114,7 +114,8 @@ the tool description).
 
 ## `--brief` Output Schema
 
-When using `--json --brief`, the output is a minimal summary object:
+`--brief` implies `--json` — passing it alone is enough. The output is a
+minimal summary object:
 
 ```json
 {
@@ -124,7 +125,8 @@ When using `--json --brief`, the output is a minimal summary object:
   "medium": 4,
   "low": 5,
   "poisoned": 0,
-  "status": "fail"
+  "status": "fail",
+  "exitCode": 2
 }
 ```
 
@@ -133,12 +135,17 @@ Fields:
 - `critical`, `high`, `medium`, `low` — tool risk counts
 - `poisoned` — number of tool poisoning findings
 - `status` — `"pass"` (clean), `"warn"` (high-risk), or `"fail"` (critical/poisoned/toxic flows)
+- `exitCode` — matches the process exit code (see below)
 
 ## Exit Codes
 
 - `0` — No critical or high-risk issues
 - `1` — High-risk issues found
 - `2` — Critical issues or tool poisoning found
+
+The exit code is also surfaced as `exitCode` on `--json` and `--brief`
+output, so agents can branch on it without re-deriving severity from
+`summary` counts.
 
 ## Supported Hosts (7)
 

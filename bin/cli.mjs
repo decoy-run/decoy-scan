@@ -23,7 +23,9 @@ const VERSION = PKG.version;
 // ─── Args ───
 
 const args = process.argv.slice(2);
-const jsonMode = args.includes("--json");
+const briefMode = args.includes("--brief");
+// --brief implies --json (it's the "Minimal JSON summary" form per --help).
+const jsonMode = args.includes("--json") || briefMode;
 const sarifMode = args.includes("--sarif");
 const noProbe = args.includes("--no-probe");
 const noAdvisories = args.includes("--no-advisories");
@@ -32,7 +34,6 @@ const versionMode = args.includes("--version") || args.includes("-V");
 const verboseMode = args.includes("--verbose") || args.includes("-v");
 const quietMode = args.includes("--quiet") || args.includes("-q");
 const reportMode = args.includes("--report");
-const briefMode = args.includes("--brief");
 const shareMode = args.includes("--share");
 const fixMode = args.includes("--fix");
 const skillsMode = args.includes("--skills");
@@ -245,7 +246,7 @@ ${c.bold}Examples:${c.reset}
 
 ${c.bold}Flags:${c.reset}
       --json              JSON output (stdout, pipeable to jq)
-      --brief             Minimal JSON summary (for agents with limited context)
+      --brief             Minimal JSON summary (implies --json; for agents)
       --sarif             SARIF 2.1.0 output
       --no-probe          Config-only scan — don't spawn servers
       --no-advisories     Skip advisory database lookup
@@ -407,7 +408,7 @@ async function main() {
   const configs = discoverConfigs();
   if (configs.length === 0) {
     if (briefMode && jsonMode) {
-      data(JSON.stringify({ servers: 0, critical: 0, high: 0, medium: 0, low: 0, poisoned: 0, status: "pass" }));
+      data(JSON.stringify({ servers: 0, critical: 0, high: 0, medium: 0, low: 0, poisoned: 0, status: "pass", exitCode: 0 }));
       return exitWhenDrained(0);
     }
     if (jsonMode) {
@@ -415,6 +416,7 @@ async function main() {
         tool: "decoy-scan",
         version: VERSION,
         timestamp: new Date().toISOString(),
+        exitCode: 0,
         hosts: [],
         servers: [],
         summary: { total: 0, critical: 0, high: 0, medium: 0, low: 0, errors: 0, poisoned: 0, suspicious: 0, envExposures: 0, toxicFlows: 0, manifestChanges: 0, skillIssues: 0 },
@@ -501,12 +503,13 @@ async function main() {
       low: s.low,
       poisoned: s.poisoned,
       status: hasCritical ? "fail" : hasHigh ? "warn" : "pass",
+      exitCode: scanExitCode,
     }));
     writeScanCache(results);
     return exitWhenDrained(scanExitCode);
   }
   if (jsonMode) {
-    data(JSON.stringify({ tool: "decoy-scan", version: VERSION, ...results }, null, 2));
+    data(JSON.stringify({ tool: "decoy-scan", version: VERSION, exitCode: scanExitCode, ...results }, null, 2));
     writeScanCache(results);
     return exitWhenDrained(scanExitCode);
   }

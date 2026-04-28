@@ -67,6 +67,23 @@ describe("classifyTool", () => {
     assert.equal(classifyTool({ name: "do_thing", description: "Reads files from disk" }), "high");
     assert.equal(classifyTool({ name: "do_thing", description: "Sends an email notification" }), "medium");
   });
+
+  it("classifies suffixed eval/exec variants as critical", () => {
+    assert.equal(classifyTool({ name: "evaluate_script" }), "critical");
+    assert.equal(classifyTool({ name: "evaluate_code" }), "critical");
+    assert.equal(classifyTool({ name: "eval_script" }), "critical");
+    assert.equal(classifyTool({ name: "execute_script" }), "critical");
+    assert.equal(classifyTool({ name: "execute_python" }), "critical");
+    assert.equal(classifyTool({ name: "run_script" }), "critical");
+    assert.equal(classifyTool({ name: "run_javascript" }), "critical");
+  });
+
+  it("name substring fallback catches risky verbs without descriptions", () => {
+    // No description provided — name alone must classify these as risky.
+    assert.equal(classifyTool({ name: "do_evaluate_thing" }), "critical");
+    assert.equal(classifyTool({ name: "spawn_worker" }), "critical");
+    assert.equal(classifyTool({ name: "fetch_remote_url" }), "high");
+  });
 });
 
 // ─── detectPoisoning ───

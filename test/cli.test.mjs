@@ -115,6 +115,22 @@ describe("json output", () => {
     // stderr should be empty or only have status messages
     assert.ok(!stderr.includes('"servers"'), "stderr should not contain JSON data");
   });
+
+  it("--json includes exitCode for agent consumption", async () => {
+    const { stdout, exitCode } = await run(["--json", "--no-advisories", "--no-probe"]);
+    const result = JSON.parse(stdout);
+    assert.equal(typeof result.exitCode, "number", "exitCode should be a number");
+    assert.equal(result.exitCode, exitCode, "JSON exitCode should match process exit code");
+  });
+
+  it("--brief alone produces JSON to stdout (implies --json)", async () => {
+    const { stdout, exitCode } = await run(["--brief", "--no-advisories", "--no-probe"]);
+    assert.ok(stdout.trim().length > 0, "--brief should produce stdout");
+    const result = JSON.parse(stdout);
+    assert.ok("status" in result, "brief output should have status field");
+    assert.equal(typeof result.exitCode, "number", "brief output should include exitCode");
+    assert.equal(result.exitCode, exitCode, "brief exitCode should match process exit code");
+  });
 });
 
 // ─── SARIF output ───
@@ -479,6 +495,13 @@ describe("explain", () => {
     assert.equal(exitCode, 0);
     assert.match(stderr, /low/);
     assert.match(stderr, /description is also checked/);
+  });
+
+  it("explain evaluate_script classifies critical via name fallback", async () => {
+    const { stderr, exitCode } = await run(["explain", "evaluate_script"]);
+    assert.equal(exitCode, 0);
+    assert.match(stderr, /critical/);
+    assert.doesNotMatch(stderr, /description is also checked/);
   });
 
   it("explain --json returns structured data", async () => {
