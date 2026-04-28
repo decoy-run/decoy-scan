@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.7] - 2026-04-28
+
+### Fixed
+- `--report` and `decoy-scan login` now open
+  `https://app.decoy.run/dashboard?tab=settings#s-setup` (the Setup & Tokens
+  section) instead of the dashboard overview. Previously users landed on the
+  overview page and had to hunt for where to copy their token, dropping the
+  signup-to-first-upload conversion rate. The token-regenerate hint shown
+  on auth failure now points to the same anchor.
+
 ## [0.5.6] - 2026-04-28
 
 ### Added

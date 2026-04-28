@@ -185,7 +185,7 @@ function saveStoredToken(token) {
 // Walks the user through sign-in: opens browser, prompts for token paste,
 // saves it. Returns the token on success, null if the user bailed.
 async function loginInteractive() {
-  const url = "https://app.decoy.run/dashboard";
+  const url = "https://app.decoy.run/dashboard?tab=settings#s-setup";
   status("");
   status(`  ${c.bold}Sign in to Decoy${c.reset}`);
   status(`  ${c.muted}Free, ~30 seconds. Email-only — no card, no password.${c.reset}`);
@@ -193,7 +193,7 @@ async function loginInteractive() {
   status(`  ${c.dim}1.${c.reset} Opening ${c.cyan}${url}${c.reset}`);
   openBrowser(url);
   status(`  ${c.dim}2.${c.reset} Sign in (or sign up if it's your first time)`);
-  status(`  ${c.dim}3.${c.reset} Copy your token from the dashboard`);
+  status(`  ${c.dim}3.${c.reset} Copy your token from Setup & Tokens`);
   status("");
 
   const token = await prompt(`  Paste your token: `);
@@ -788,7 +788,7 @@ async function main() {
         status(`  ${c.dim}${d.dashboardUrl}${c.reset}`);
       } else {
         status(`  ${c.red}Upload failed: ${d.error}${c.reset}`);
-        status(`  ${c.dim}Hint: Check that your token is valid — regenerate at https://app.decoy.run/dashboard${c.reset}`);
+        status(`  ${c.dim}Hint: Check that your token is valid — regenerate at https://app.decoy.run/dashboard?tab=settings#s-setup${c.reset}`);
       }
     } catch (e) {
       sp.stop();
