@@ -175,11 +175,17 @@ describe("decoy self-detection", () => {
   });
 
   it("human output shows tripwires active for decoy server", async () => {
+    // Gate on the JSON output's authoritative `decoy` flag, not on a stderr
+    // substring. A bare `system-tools` entry in MCP configs (without
+    // DECOY_TOKEN) is a real server, not a decoy — the previous gate fired
+    // on it and asserted the wrong invariant.
+    const { stdout } = await run(["--json", "--no-advisories", "--no-probe"]);
+    const { servers } = JSON.parse(stdout);
+    if (!servers.some(s => s.decoy)) return;
+
     const { stderr } = await run(["--no-advisories", "--no-probe"]);
-    if (stderr.includes("system-tools")) {
-      assert.match(stderr, /Tripwires active/, "decoy server should show 'Tripwires active'");
-      assert.ok(!stderr.includes("POISONING"), "decoy findings should not appear");
-    }
+    assert.match(stderr, /Tripwires active/, "decoy server should show 'Tripwires active'");
+    assert.ok(!stderr.includes("POISONING"), "decoy findings should not appear");
   });
 });
 
