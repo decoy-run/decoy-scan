@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.8] - 2026-05-06
+
+### Added
+- Scan output now ends with a one-line GitHub star ask. Mirrors the same line
+  in `decoy-tripwire` and `decoy-redteam`, so users running multiple Decoy
+  CLIs see consistent post-run output.
+
 ## [0.5.7] - 2026-04-28
 
 ### Fixed

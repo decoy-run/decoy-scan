@@ -828,6 +828,10 @@ async function main() {
     status(`  ${c.green}✓${c.reset} ${c.dim}Clean scan, tripwires active. You're set.${c.reset}`);
   }
 
+  status("");
+  status(`  ${c.dim}★ If decoy-scan helps, a star helps us prioritize what to build:${c.reset}`);
+  status(`  ${c.dim}  ${c.cyan}https://github.com/decoy-run/decoy-scan${c.reset}`);
+
   // CI/CD policy gate
   let policyExit = exit;
   if (policyArg) {
