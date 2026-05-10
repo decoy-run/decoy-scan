@@ -11,11 +11,13 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 
 let tempHome;
 let originalHome;
+let originalUserProfile;
 let originalTelemetryEnv;
 let originalApiBaseEnv;
 
 before(() => {
   originalHome = process.env.HOME;
+  originalUserProfile = process.env.USERPROFILE;
   originalTelemetryEnv = process.env.DECOY_TELEMETRY;
   originalApiBaseEnv = process.env.DECOY_API_BASE;
 });
@@ -23,7 +25,10 @@ before(() => {
 beforeEach(() => {
   if (tempHome && existsSync(tempHome)) rmSync(tempHome, { recursive: true, force: true });
   tempHome = mkdtempSync(join(tmpdir(), "decoy-test-"));
+  // os.homedir() on POSIX reads HOME; on Windows it reads USERPROFILE.
+  // Set both so the test isolates the home directory across platforms.
   process.env.HOME = tempHome;
+  process.env.USERPROFILE = tempHome;
   delete process.env.DECOY_TELEMETRY;
   delete process.env.DECOY_API_BASE;
 });
@@ -31,6 +36,8 @@ beforeEach(() => {
 after(() => {
   if (tempHome && existsSync(tempHome)) rmSync(tempHome, { recursive: true, force: true });
   process.env.HOME = originalHome;
+  if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = originalUserProfile;
   if (originalTelemetryEnv === undefined) delete process.env.DECOY_TELEMETRY;
   else process.env.DECOY_TELEMETRY = originalTelemetryEnv;
   if (originalApiBaseEnv === undefined) delete process.env.DECOY_API_BASE;

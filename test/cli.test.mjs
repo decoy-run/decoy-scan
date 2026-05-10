@@ -5,23 +5,40 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFileSync, existsSync, unlinkSync } from "node:fs";
+import { readFileSync, existsSync, unlinkSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { hashToolManifest, detectManifestChanges, analyzeToxicFlows, analyzeSkill } from "../index.mjs";
 
 const exec = promisify(execFile);
 const CLI = join(import.meta.dirname, "..", "bin", "cli.mjs");
 const SCAN_CACHE = join(homedir(), ".decoy", "scan.json");
+// Per-test-process tempdir: isolates ~/.decoy from the dev machine's real
+// state (cached tier, stored token, install_id) so explain tests reliably
+// see the free path instead of resolving to whatever tier the dev/CI host
+// happens to have cached. Each `node --test` invocation gets a fresh dir.
+const TEMP_HOME = mkdtempSync(join(tmpdir(), "decoy-scan-test-"));
 
 async function run(args = [], opts = {}) {
   try {
     const { stdout, stderr } = await exec("node", [CLI, ...args], {
       timeout: 30000,
       maxBuffer: 1024 * 1024,
-      // Disable telemetry by default in tests so we don't pollute the worker
-      // and don't add 2s of network wait to every CLI test invocation.
-      env: { DECOY_TELEMETRY: "0", ...process.env, ...opts.env },
+      env: {
+        ...process.env,
+        // Disable telemetry by default in tests — don't pollute the live
+        // worker and don't add network wait to every CLI invocation.
+        DECOY_TELEMETRY: "0",
+        // Point billing/tier lookup at an unreachable URL so resolveTier
+        // returns "unknown" fast (free path). Avoids tests on dev machines
+        // resolving against the real API and seeing paid-tier behavior.
+        DECOY_API_BASE: "http://127.0.0.1:1",
+        // Isolate ~/.decoy so the test doesn't read a cached paid tier
+        // (or a stored token) from the dev machine. Cleared between runs.
+        HOME: TEMP_HOME,
+        USERPROFILE: TEMP_HOME,
+        ...opts.env,
+      },
     });
     return { stdout, stderr, exitCode: 0 };
   } catch (e) {
@@ -469,19 +486,22 @@ describe("explain", () => {
     assert.match(stderr, /Things you can explain/);
   });
 
-  it("explain <tier> returns tier content", async () => {
+  it("explain <tier> returns tier content (free path: meaning only, remediation gated)", async () => {
+    // Free path: WHAT/WHY block prints, but the "What to do" remediation line
+    // is replaced by an upgrade prompt. See lib/explain.mjs split-by-tier
+    // landed in 0.6.0.
     const { stderr, exitCode } = await run(["explain", "critical"]);
     assert.equal(exitCode, 0);
     assert.match(stderr, /Critical/);
     assert.match(stderr, /execute code/);
-    assert.match(stderr, /What to do/);
+    assert.match(stderr, /Detailed fix steps available on Team/);
   });
 
-  it("explain <category> returns category content", async () => {
+  it("explain <category> returns category content (free path: meaning only)", async () => {
     const { stderr, exitCode } = await run(["explain", "tool-description"]);
     assert.equal(exitCode, 0);
     assert.match(stderr, /Prompt injection/);
-    assert.match(stderr, /Fix:/);
+    assert.match(stderr, /Detailed fix steps available on Team/);
   });
 
   it("explain <poisoning-type> returns poisoning content", async () => {
