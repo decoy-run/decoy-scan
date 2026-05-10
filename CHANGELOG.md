@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.0] - 2026-05-10
+
+### Added
+- **`--verify` flag.** AI-revalidates scan findings via `/api/verify`: Haiku 4.5
+  triages each finding into P0/P1/P2, then Sonnet 4.6 revalidates P0/P1 and
+  drops false positives. Free tier gets 5 verifications/installId/month;
+  Team+ unlocks unlimited. Output shows raw vs verified counts and the
+  reasoning the model used.
+- **Anonymous telemetry (default-on).** Every scan now reports a redacted
+  finding summary (counts, OWASP categories, finding sources — never raw
+  tool descriptions, paths, or arguments) to `/api/telemetry`. Identified by
+  a stable `~/.decoy/install_id` UUID, not by email or hostname. On signup,
+  the install_id links pre-account history to the new account. Disable with
+  `DECOY_TELEMETRY=0` env var or `--no-telemetry` flag. See
+  https://decoy.run/privacy for what's collected.
+- **`--no-telemetry` flag** for opting out per-run.
+- **First-run telemetry notice** (one line, once per machine, cached at
+  `~/.decoy/telemetry-notice-shown`).
+
+### Changed
+- **`explain` command split into free meaning + paid remediation.** The
+  "what it is" and "why it matters" content stays free. The "how to fix"
+  remediation block now requires a Team+ token. Tier is resolved via
+  `/api/billing` and cached at `~/.decoy/tier` for 24h.
+- **Upgrade prompts now anchored on actual finding count.** Replaces the
+  generic `--report` prompt with `npx decoy-scan --verify  # AI-verify N findings`.
+
 ## [0.5.8] - 2026-05-06
 
 ### Added

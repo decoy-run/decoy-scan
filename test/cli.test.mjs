@@ -19,7 +19,9 @@ async function run(args = [], opts = {}) {
     const { stdout, stderr } = await exec("node", [CLI, ...args], {
       timeout: 30000,
       maxBuffer: 1024 * 1024,
-      env: { ...process.env, ...opts.env },
+      // Disable telemetry by default in tests so we don't pollute the worker
+      // and don't add 2s of network wait to every CLI test invocation.
+      env: { DECOY_TELEMETRY: "0", ...process.env, ...opts.env },
     });
     return { stdout, stderr, exitCode: 0 };
   } catch (e) {

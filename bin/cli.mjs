@@ -10,6 +10,9 @@ import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 import readline from "node:readline";
 import { resolveExplain, listExplainTargets, TIERS, CATEGORIES, POISONING } from "../lib/explain.mjs";
+import { send as sendTelemetry, maybePrintFirstRunNotice, summarizeScanForTelemetry } from "../lib/telemetry.mjs";
+import { verifyFindings } from "../lib/verify.mjs";
+import { resolveTier, isPaidTier } from "../lib/tier.mjs";
 
 // Persisted token location — written by `login`, read by --report.
 const TOKEN_FILE = join(homedir(), ".decoy", "token");
@@ -35,6 +38,8 @@ const verboseMode = args.includes("--verbose") || args.includes("-v");
 const quietMode = args.includes("--quiet") || args.includes("-q");
 const reportMode = args.includes("--report");
 const shareMode = args.includes("--share");
+const noTelemetry = args.includes("--no-telemetry");
+const verifyMode = args.includes("--verify");
 const fixMode = args.includes("--fix");
 const skillsMode = args.includes("--skills");
 const yesMode = args.includes("--yes") || args.includes("-y");
@@ -105,10 +110,17 @@ function data(msg) {
   process.stdout.write(msg + "\n");
 }
 
+// Pending telemetry POST — set when scan completes, awaited at exit so the
+// network request actually leaves before the process tears down.
+let pendingTelemetry = null;
+
 // Exit after all queued stdout writes drain. Using process.exit() directly
 // truncates large JSON/SARIF output when stdout is piped, because Node kills
 // the process before the pipe buffer flushes.
-function exitWhenDrained(code) {
+async function exitWhenDrained(code) {
+  if (pendingTelemetry) {
+    try { await pendingTelemetry; } catch { /* never fail a run on telemetry */ }
+  }
   process.exitCode = code;
   if (process.stdout.writableLength > 0) {
     process.stdout.once("drain", () => process.exit(code));
@@ -252,8 +264,10 @@ ${c.bold}Flags:${c.reset}
       --no-advisories     Skip advisory database lookup
       --report            Upload results to Decoy dashboard
       --share             Generate a shareable public URL for results
+      --verify            AI-revalidate findings (5/mo free, unlimited on Team)
       --skills            Scan Claude Code skills for injection and secrets
       --token string      API token (or set DECOY_TOKEN env var)
+      --no-telemetry      Disable anonymized telemetry (or set DECOY_TELEMETRY=0)
   -y, --yes               Skip confirmation prompts (for CI use)
   -v, --verbose           Show all tools including low-risk
   -q, --quiet             Suppress status output
@@ -296,11 +310,10 @@ if (command === "login") {
 // ─── Explain ───
 
 if (command === "explain") {
-  runExplain(commandArg);
-  exitWhenDrained(0);
+  runExplain(commandArg).then(() => exitWhenDrained(0));
 }
 
-function runExplain(target) {
+async function runExplain(target) {
   if (!target || target === "list") {
     if (jsonMode) {
       data(JSON.stringify({ tool: "decoy-scan", version: VERSION, ...listExplainTargets() }, null, 2));
@@ -338,6 +351,22 @@ function runExplain(target) {
 
   const severityColor = { critical: c.red, high: c.orange, medium: c.yellow, low: c.dim };
 
+  // Gate remediation guidance ("How to fix") on Team+. The "what it is + why
+  // it matters" content stays free — that's the explainer hook. Paid gets the
+  // actionable how-to-fix block. Tier is cached at ~/.decoy/tier for 24h so
+  // explain stays snappy after the first call.
+  const tier = await resolveTier(tokenArg);
+  const paid = isPaidTier(tier);
+
+  function renderRemediationOrUpgrade(remediationLine) {
+    if (paid) {
+      status(wrapText(remediationLine, 2, c.muted));
+    } else {
+      status(`  ${c.dim}Detailed fix steps available on Team ($29/seat/mo).${c.reset}`);
+      status(`  ${c.dim}${c.cyan}npx decoy-scan login${c.reset}${c.dim} then re-run explain — or upgrade at decoy.run/pricing${c.reset}`);
+    }
+  }
+
   status("");
   if (result.kind === "tier") {
     status(`  ${severityColor[result.key] || c.bold}${c.bold}${result.title}${c.reset}  ${c.muted}${result.summary}${c.reset}`);
@@ -346,7 +375,7 @@ function runExplain(target) {
     status("");
     status(`  ${c.bold}Examples${c.reset}  ${c.muted}${result.examples.join(", ")}${c.reset}`);
     status("");
-    status(wrapText(`What to do: ${result.advice}`, 2, c.muted));
+    renderRemediationOrUpgrade(`What to do: ${result.advice}`);
   } else if (result.kind === "category") {
     const tc = { red: c.red, yellow: c.yellow, info: c.muted }[result.tier] || c.muted;
     status(`  ${tc}${c.bold}${result.title}${c.reset}`);
@@ -354,7 +383,7 @@ function runExplain(target) {
     status("");
     status(wrapText(result.body, 2, c.muted));
     status("");
-    status(wrapText(`Fix: ${result.fix}`, 2, c.muted));
+    renderRemediationOrUpgrade(`Fix: ${result.fix}`);
   } else if (result.kind === "poisoning") {
     status(`  ${POISONED_COLOR}${c.bold}${result.title}${c.reset}  ${c.muted}${result.severity}${c.reset}`);
     status(`  ${c.muted}${result.summary}${c.reset}`);
@@ -370,7 +399,7 @@ function runExplain(target) {
       status("");
     }
     status(`  ${c.bold}${result.tier.title}${c.reset}  ${c.muted}${result.tier.summary}${c.reset}`);
-    status(wrapText(`What to do: ${result.tier.advice}`, 2, c.muted));
+    renderRemediationOrUpgrade(`What to do: ${result.tier.advice}`);
   }
   status("");
 }
@@ -456,6 +485,18 @@ async function main() {
   const results = await scan({ probe: !noProbe, advisories: !noAdvisories, skills: skillsMode, configs });
   const scanElapsedSec = Math.max(1, Math.round((Date.now() - scanStartedAt) / 1000));
   sp.stop();
+
+  // Kick off anonymous telemetry alongside output rendering so the network
+  // round-trip overlaps with the rest of the run. Awaited via exitWhenDrained
+  // and the bottom-of-main fallback below.
+  pendingTelemetry = sendTelemetry({
+    tool: "decoy-scan",
+    version: VERSION,
+    event: "scan_complete",
+    payload: summarizeScanForTelemetry(results),
+    disabled: noTelemetry,
+  });
+  const telemetryPromise = pendingTelemetry;
 
   // #4: Explain what --no-probe misses
   if (noProbe && !machineMode) {
@@ -759,6 +800,40 @@ async function main() {
     status(`  ${c.muted}  Review these in your MCP host and install tripwires below to catch exploitation.${c.reset}`);
   }
 
+  // --verify: AI-revalidated findings. Free path consumes 5/month quota
+  // gated server-side; Team+ token bypasses the counter.
+  if (verifyMode && !machineMode) {
+    status("");
+    const sp = spinner("Verifying findings (Haiku triage + Sonnet revalidation)…");
+    const v = await verifyFindings({ results, token: tokenArg });
+    sp.stop();
+    if (v.ok) {
+      const { stats, verified, quota } = v;
+      const dropped = stats.dropped || 0;
+      const kept = verified.filter(f => f.priority !== "P2").length;
+      status(`  ${c.bold}AI-verified findings${c.reset}  ${c.dim}${stats.input} candidates → ${kept} confirmed, ${dropped} dropped as FP${c.reset}`);
+      const sevColor = { P0: c.red, P1: c.orange, P2: c.dim };
+      for (const f of verified) {
+        if (f.priority === "P2") continue;
+        const fc = sevColor[f.priority] || c.dim;
+        const conf = `${Math.round((f.confidence || 0) * 100)}%`;
+        status(`  ${fc}${f.priority}${c.reset} ${c.dim}${f.server}${c.reset} ${f.tool ? c.dim + "· " + f.tool + c.reset : ""}  ${c.muted}${conf} confidence${c.reset}`);
+        if (f.reasoning) status(`     ${c.dim}${f.reasoning}${c.reset}`);
+      }
+      if (quota) {
+        status(`  ${c.muted}Free verify quota: ${quota.used}/${quota.limit} used this month  ·  Unlimited on Team ($29/seat/mo) — decoy.run/pricing${c.reset}`);
+      }
+    } else if (v.code === "quota_exhausted") {
+      const used = v.quota?.used ?? "—", limit = v.quota?.limit ?? 5;
+      status(`  ${c.yellow}Free verify quota exhausted${c.reset}  ${c.dim}(${used}/${limit} this month)${c.reset}`);
+      status(`  ${c.dim}Verify unlimited on Team ($29/seat/mo): ${v.upgradeUrl || "decoy.run/pricing"}${c.reset}`);
+    } else if (v.code === "rate_limited") {
+      status(`  ${c.yellow}Verify rate-limited.${c.reset} ${c.dim}Try again in a minute.${c.reset}`);
+    } else {
+      status(`  ${c.dim}Verify failed: ${v.message}${c.reset}`);
+    }
+  }
+
   // Upload
   if (reportMode) {
     let token = tokenArg;
@@ -806,6 +881,14 @@ async function main() {
 
   if (hasIssues) {
     status(`  ${c.dim}$${c.reset} npx decoy-scan explain <finding>   ${c.dim}# What it means and how to fix${c.reset}`);
+  }
+
+  // Verify upsell — anchored on the actual finding count from this run.
+  // The hook is "Y of these are likely false positives" because that's the
+  // pain point users feel after every regex-only scan.
+  if (hasIssues && !verifyMode) {
+    const totalIssues = issuesFound;
+    status(`  ${c.dim}$${c.reset} npx decoy-scan --verify             ${c.dim}# AI-verify ${totalIssues} finding${totalIssues > 1 ? "s" : ""} (5/mo free, unlimited on Team)${c.reset}`);
   }
 
   if (!hasDecoy) {
@@ -1019,6 +1102,16 @@ async function main() {
 
   // Write scan cache for decoy-tripwire exposure analysis
   writeScanCache(results);
+
+  // First-run telemetry notice — printed once per machine, after the user has
+  // already seen value. Skip in machine-readable output modes.
+  if (!machineMode && !jsonMode && !sarifMode) {
+    maybePrintFirstRunNotice({ tool: "decoy-scan", stream: process.stderr });
+  }
+
+  // Wait for telemetry POST to finish (or its 2s internal timeout) so the
+  // request actually leaves before process exit.
+  try { await telemetryPromise; } catch { /* never fail a run on telemetry */ }
 
   status("");
   process.exit(policyExit);
