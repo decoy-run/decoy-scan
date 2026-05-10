@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.0] - 2026-05-10
+
+### Added
+- **v2 telemetry envelope.** Every event now carries `schema_version`,
+  `event_id` (for server-side dedup), `run_id` (groups events from one
+  invocation), `ts`, and an `env` block with `node`, `platform`, `arch`,
+  `ci` flag, MCP `host` (claude-desktop / cursor / windsurf / vscode /
+  claude-code / zed / cline / ci / cli), and `locale`. Lets us segment
+  cohorts and answer questions like "Linux CI users convert 3x more
+  than macOS dev users" — table-stakes business data.
+- **New events:** `cli.invoked` (funnel denominator — fires first
+  thing, before any work, so even bounced/crashed runs are counted),
+  `scan.discovery` (what hosts/servers the user has — single most
+  useful "who is this user" signal), and renamed event names to dotted
+  form (`scan.complete`, `scan.uploaded`).
+- **Retry + persistent queue.** 1 retry with 200→800ms backoff on
+  transient failures. Final failures append to
+  `~/.decoy/telemetry-queue.jsonl` (FIFO, capped at 1000 events). The
+  next CLI run drains the queue as a single batched POST before doing
+  anything else. Network flakiness no longer drops events.
+- **First-run dashboard link.** The CLI prints
+  `See your dashboard: https://app.decoy.run/d/<installId>` at the end
+  of every human-mode run. Clicking links the install_id to your
+  account, claiming pre-signup history.
+
+### Changed
+- Legacy `send()` helper still works — it now maps v1 event names to
+  v2 internally and emits the new envelope. Old CLI tests pass without
+  changes.
+
 ## [0.6.2] - 2026-05-10
 
 ### Fixed

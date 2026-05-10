@@ -10,7 +10,15 @@ import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 import readline from "node:readline";
 import { resolveExplain, listExplainTargets, TIERS, CATEGORIES, POISONING } from "../lib/explain.mjs";
-import { send as sendTelemetry, maybePrintFirstRunNotice, summarizeScanForTelemetry } from "../lib/telemetry.mjs";
+import {
+  sendEvent as sendTelemetryEvent,
+  flushQueue as flushTelemetryQueue,
+  newRunId,
+  inferHostFromConfigs,
+  maybePrintFirstRunNotice,
+  maybePrintClaimURL,
+  summarizeScanForTelemetry,
+} from "../lib/telemetry.mjs";
 import { verifyFindings } from "../lib/verify.mjs";
 import { resolveTier, isPaidTier } from "../lib/tier.mjs";
 
@@ -428,6 +436,12 @@ function wrapText(text, indent = 2, color = "") {
 async function main() {
   const machineMode = jsonMode || sarifMode;
 
+  // One run_id for the whole invocation so every event from this run
+  // groups together server-side. Also: fire cli.invoked immediately so
+  // the funnel denominator counts even bounced/crashed runs.
+  const runId = newRunId();
+  flushTelemetryQueue().catch(() => {});
+
   if (!machineMode) {
     status("");
     status(`  ${c.bold}decoy-scan${c.reset} ${c.dim}v${VERSION}${c.reset}`);
@@ -435,16 +449,52 @@ async function main() {
 
   // Discovery
   const configs = discoverConfigs();
+  const host = inferHostFromConfigs(configs);
+
+  // cli.invoked — earliest event; funnel denominator. payload is small
+  // so we can fire it even before scan work starts.
+  sendTelemetryEvent({
+    tool: "decoy-scan",
+    version: VERSION,
+    event: "cli.invoked",
+    runId,
+    host,
+    payload: {
+      mode: jsonMode ? "json" : sarifMode ? "sarif" : briefMode ? "brief" : "human",
+      hasToken: !!tokenArg,
+      verifyMode,
+      reportMode,
+      shareMode,
+    },
+    disabled: noTelemetry,
+  }).catch(() => {});
+
+  // scan.discovery — what hosts/servers the user has. The single most
+  // useful "who is this user" signal we capture.
+  sendTelemetryEvent({
+    tool: "decoy-scan",
+    version: VERSION,
+    event: "scan.discovery",
+    runId,
+    host,
+    payload: {
+      hostCount: configs.length,
+      serverCount: configs.reduce((n, c) => n + Object.keys(c.servers || {}).length, 0),
+      hosts: configs.map(c => c.host).slice(0, 10),
+    },
+    disabled: noTelemetry,
+  }).catch(() => {});
+
   if (configs.length === 0) {
-    // Fire telemetry even on empty discovery. Without this, every
-    // first-time `npx decoy-scan` in a fresh dir without an MCP client
-    // configured exits silently and we never learn anyone tried. That
-    // was producing zero install-events for ~600 weekly downloads,
-    // because most curious-installers do exactly this and bounce.
-    pendingTelemetry = sendTelemetry({
+    // Empty discovery still gets a scan.complete event with noConfigs.
+    // Pre-2026-05-10 we exited here silently, losing the largest
+    // single segment of would-be users — fresh-dir explorers.
+    pendingTelemetry = sendTelemetryEvent({
       tool: "decoy-scan",
       version: VERSION,
-      event: "scan_complete",
+      event: "scan.complete",
+      runId,
+      host,
       payload: { noConfigs: true, hostsChecked: 7 },
       disabled: noTelemetry,
     });
@@ -501,13 +551,15 @@ async function main() {
   const scanElapsedSec = Math.max(1, Math.round((Date.now() - scanStartedAt) / 1000));
   sp.stop();
 
-  // Kick off anonymous telemetry alongside output rendering so the network
-  // round-trip overlaps with the rest of the run. Awaited via exitWhenDrained
+  // Kick off the main scan.complete event alongside output rendering
+  // so the network round-trip overlaps. Awaited via exitWhenDrained
   // and the bottom-of-main fallback below.
-  pendingTelemetry = sendTelemetry({
+  pendingTelemetry = sendTelemetryEvent({
     tool: "decoy-scan",
     version: VERSION,
-    event: "scan_complete",
+    event: "scan.complete",
+    runId,
+    host,
     payload: summarizeScanForTelemetry(results),
     disabled: noTelemetry,
   });
@@ -1122,6 +1174,9 @@ async function main() {
   // already seen value. Skip in machine-readable output modes.
   if (!machineMode && !jsonMode && !sarifMode) {
     maybePrintFirstRunNotice({ tool: "decoy-scan", stream: process.stderr });
+    // Claim URL — last line in human mode. Lets the user click into a
+    // dashboard already populated with this install's history.
+    maybePrintClaimURL({ tool: "decoy-scan", stream: process.stderr });
   }
 
   // Wait for telemetry POST to finish (or its 2s internal timeout) so the
