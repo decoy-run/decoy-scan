@@ -436,6 +436,21 @@ async function main() {
   // Discovery
   const configs = discoverConfigs();
   if (configs.length === 0) {
+    // Fire telemetry even on empty discovery. Without this, every
+    // first-time `npx decoy-scan` in a fresh dir without an MCP client
+    // configured exits silently and we never learn anyone tried. That
+    // was producing zero install-events for ~600 weekly downloads,
+    // because most curious-installers do exactly this and bounce.
+    pendingTelemetry = sendTelemetry({
+      tool: "decoy-scan",
+      version: VERSION,
+      event: "scan_complete",
+      payload: { noConfigs: true, hostsChecked: 7 },
+      disabled: noTelemetry,
+    });
+    if (!machineMode && !jsonMode && !sarifMode) {
+      maybePrintFirstRunNotice({ tool: "decoy-scan", stream: process.stderr });
+    }
     if (briefMode && jsonMode) {
       data(JSON.stringify({ servers: 0, critical: 0, high: 0, medium: 0, low: 0, poisoned: 0, status: "pass", exitCode: 0 }));
       return exitWhenDrained(0);

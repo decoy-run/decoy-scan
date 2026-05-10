@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.2] - 2026-05-10
+
+### Fixed
+- **Telemetry now fires when no MCP configs are found.** Previously
+  the CLI exited at the empty-discovery branch (`bin/cli.mjs:438`)
+  *before* the telemetry call site, so every first-time
+  `npx decoy-scan` in a fresh dir without an MCP client configured
+  bounced silently and we never learned anyone tried. Now sends a
+  `scan_complete` event with `{noConfigs: true}` payload before
+  exiting. This was the dominant reason real-user telemetry was at
+  zero for the 0.6.0/0.6.1 rollout.
+
 ## [0.6.0] - 2026-05-10
 
 ### Added
