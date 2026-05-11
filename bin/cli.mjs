@@ -897,12 +897,17 @@ async function main() {
       if (quota) {
         status(`  ${c.muted}Free verify quota: ${quota.used}/${quota.limit} used this month  ·  Unlimited on Team ($29/seat/mo) — decoy.run/pricing${c.reset}`);
       }
+    } else if (v.code === "no_account") {
+      status(`  ${c.yellow}AI verification needs a free Decoy account.${c.reset}`);
+      status(`  ${c.dim}One-time signup — keeps the free tier sustainable.${c.reset}`);
+      status(`  ${c.dim}Claim this install: ${c.reset}${v.claimUrl}`);
     } else if (v.code === "quota_exhausted") {
       const used = v.quota?.used ?? "—", limit = v.quota?.limit ?? 5;
       status(`  ${c.yellow}Free verify quota exhausted${c.reset}  ${c.dim}(${used}/${limit} this month)${c.reset}`);
       status(`  ${c.dim}Verify unlimited on Team ($29/seat/mo): ${v.upgradeUrl || "decoy.run/pricing"}${c.reset}`);
     } else if (v.code === "rate_limited") {
-      status(`  ${c.yellow}Verify rate-limited.${c.reset} ${c.dim}Try again in a minute.${c.reset}`);
+      const cap = v.cap ? ` (${v.cap}/day cap)` : "";
+      status(`  ${c.yellow}Verify rate-limited${cap}.${c.reset} ${c.dim}Try again tomorrow${v.upgradeUrl ? ` or upgrade: ${v.upgradeUrl}` : ""}.${c.reset}`);
     } else {
       status(`  ${c.dim}Verify failed: ${v.message}${c.reset}`);
     }
@@ -962,7 +967,7 @@ async function main() {
   // pain point users feel after every regex-only scan.
   if (hasIssues && !verifyMode) {
     const totalIssues = issuesFound;
-    status(`  ${c.dim}$${c.reset} npx decoy-scan --verify             ${c.dim}# AI-verify ${totalIssues} finding${totalIssues > 1 ? "s" : ""} (5/mo free, unlimited on Team)${c.reset}`);
+    status(`  ${c.dim}$${c.reset} npx decoy-scan --verify             ${c.dim}# AI-verify ${totalIssues} finding${totalIssues > 1 ? "s" : ""} (free account, 5/mo)${c.reset}`);
   }
 
   if (!hasDecoy) {
