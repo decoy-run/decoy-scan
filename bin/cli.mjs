@@ -118,16 +118,24 @@ function data(msg) {
   process.stdout.write(msg + "\n");
 }
 
-// Pending telemetry POST — set when scan completes, awaited at exit so the
-// network request actually leaves before the process tears down.
-let pendingTelemetry = null;
+// Pending telemetry promises — every fire-and-forget telemetry call
+// (flushQueue, cli.invoked, scan.discovery, scan.complete) is tracked
+// here so exitWhenDrained can await all of them before process.exit.
+// Without this the queue-drain POST gets killed mid-flight and the
+// queue file never gets cleared.
+const pendingTelemetry = [];
+function trackTelemetry(p) {
+  if (p && typeof p.then === "function") pendingTelemetry.push(p.catch(() => {}));
+  return p;
+}
 
 // Exit after all queued stdout writes drain. Using process.exit() directly
 // truncates large JSON/SARIF output when stdout is piped, because Node kills
 // the process before the pipe buffer flushes.
 async function exitWhenDrained(code) {
-  if (pendingTelemetry) {
-    try { await pendingTelemetry; } catch { /* never fail a run on telemetry */ }
+  if (pendingTelemetry.length > 0) {
+    try { await Promise.allSettled(pendingTelemetry); } catch { /* never fail a run on telemetry */ }
+    pendingTelemetry.length = 0;
   }
   process.exitCode = code;
   if (process.stdout.writableLength > 0) {
@@ -440,7 +448,7 @@ async function main() {
   // groups together server-side. Also: fire cli.invoked immediately so
   // the funnel denominator counts even bounced/crashed runs.
   const runId = newRunId();
-  flushTelemetryQueue().catch(() => {});
+  trackTelemetry(flushTelemetryQueue());
 
   if (!machineMode) {
     status("");
@@ -453,7 +461,7 @@ async function main() {
 
   // cli.invoked — earliest event; funnel denominator. payload is small
   // so we can fire it even before scan work starts.
-  sendTelemetryEvent({
+  trackTelemetry(sendTelemetryEvent({
     tool: "decoy-scan",
     version: VERSION,
     event: "cli.invoked",
@@ -467,11 +475,11 @@ async function main() {
       shareMode,
     },
     disabled: noTelemetry,
-  }).catch(() => {});
+  }));
 
   // scan.discovery — what hosts/servers the user has. The single most
   // useful "who is this user" signal we capture.
-  sendTelemetryEvent({
+  trackTelemetry(sendTelemetryEvent({
     tool: "decoy-scan",
     version: VERSION,
     event: "scan.discovery",
@@ -483,13 +491,13 @@ async function main() {
       hosts: configs.map(c => c.host).slice(0, 10),
     },
     disabled: noTelemetry,
-  }).catch(() => {});
+  }));
 
   if (configs.length === 0) {
     // Empty discovery still gets a scan.complete event with noConfigs.
     // Pre-2026-05-10 we exited here silently, losing the largest
     // single segment of would-be users — fresh-dir explorers.
-    pendingTelemetry = sendTelemetryEvent({
+    trackTelemetry(sendTelemetryEvent({
       tool: "decoy-scan",
       version: VERSION,
       event: "scan.complete",
@@ -497,7 +505,7 @@ async function main() {
       host,
       payload: { noConfigs: true, hostsChecked: 7 },
       disabled: noTelemetry,
-    });
+    }));
     if (!machineMode && !jsonMode && !sarifMode) {
       maybePrintFirstRunNotice({ tool: "decoy-scan", stream: process.stderr });
     }
@@ -552,9 +560,9 @@ async function main() {
   sp.stop();
 
   // Kick off the main scan.complete event alongside output rendering
-  // so the network round-trip overlaps. Awaited via exitWhenDrained
-  // and the bottom-of-main fallback below.
-  pendingTelemetry = sendTelemetryEvent({
+  // so the network round-trip overlaps. All telemetry promises are
+  // tracked so exitWhenDrained awaits the whole set before exit.
+  const telemetryPromise = trackTelemetry(sendTelemetryEvent({
     tool: "decoy-scan",
     version: VERSION,
     event: "scan.complete",
@@ -562,8 +570,7 @@ async function main() {
     host,
     payload: summarizeScanForTelemetry(results),
     disabled: noTelemetry,
-  });
-  const telemetryPromise = pendingTelemetry;
+  }));
 
   // #4: Explain what --no-probe misses
   if (noProbe && !machineMode) {
@@ -1179,9 +1186,15 @@ async function main() {
     maybePrintClaimURL({ tool: "decoy-scan", stream: process.stderr });
   }
 
-  // Wait for telemetry POST to finish (or its 2s internal timeout) so the
-  // request actually leaves before process exit.
-  try { await telemetryPromise; } catch { /* never fail a run on telemetry */ }
+  // Wait for ALL tracked telemetry promises (flushQueue + cli.invoked +
+  // scan.discovery + scan.complete) so the queue actually drains and
+  // events actually post before process.exit. void telemetryPromise
+  // since it's already tracked.
+  void telemetryPromise;
+  if (pendingTelemetry.length > 0) {
+    try { await Promise.allSettled(pendingTelemetry); } catch { /* never fail a run on telemetry */ }
+    pendingTelemetry.length = 0;
+  }
 
   status("");
   process.exit(policyExit);
