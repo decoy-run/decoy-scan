@@ -1186,9 +1186,10 @@ async function main() {
   // already seen value. Skip in machine-readable output modes.
   if (!machineMode && !jsonMode && !sarifMode) {
     maybePrintFirstRunNotice({ tool: "decoy-scan", stream: process.stderr });
-    // Claim URL — last line in human mode. Lets the user click into a
-    // dashboard already populated with this install's history.
-    maybePrintClaimURL({ tool: "decoy-scan", stream: process.stderr });
+    // Claim URL — last line in human mode. Pass the scan summary so the
+    // CTA is findings-aware ("3 findings — keep them past this terminal")
+    // instead of a generic footnote.
+    maybePrintClaimURL({ tool: "decoy-scan", stream: process.stderr, summary: results.summary });
   }
 
   // Wait for ALL tracked telemetry promises (flushQueue + cli.invoked +

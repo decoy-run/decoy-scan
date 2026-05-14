@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.1] - 2026-05-14
+
+### Changed
+- **Findings-aware closing output.** The end-of-run claim line was a
+  generic "See your dashboard: <url>" footnote, disconnected from the
+  scan that just ran. It now ties the CTA to the result — `3 findings —
+  keep them past this terminal:` with a one-line value note (history,
+  re-scan diffs, severity review). Honest framing: terminal output is
+  ephemeral; the dashboard makes it persistent and diffable. The
+  CLI→account claim flow itself was verified working end-to-end in
+  production; the gap was that the handoff had no force behind it.
+
 ## [0.7.0] - 2026-05-10
 
 ### Added
