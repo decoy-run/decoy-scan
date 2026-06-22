@@ -1,7 +1,7 @@
 // decoy-scan — MCP supply chain scanner
 // Public API — re-exports from lib/ modules.
 
-export { classifyTool, detectPoisoning, analyzeServerCommand, analyzePackageSource, analyzeEnvExposure, analyzeTransport, analyzeReadiness, analyzeInputSanitization, analyzePermissionScope, hashToolManifest, detectManifestChanges, analyzeToxicFlows } from "./lib/analyzers.mjs";
+export { classifyTool, detectPoisoning, analyzeServerCommand, analyzePackageSource, analyzeHardcodedSecrets, analyzeEnvExposure, analyzeTransport, analyzeReadiness, analyzeInputSanitization, analyzePermissionScope, hashToolManifest, detectManifestChanges, analyzeToxicFlows } from "./lib/analyzers.mjs";
 export { discoverSkills, analyzeSkill } from "./lib/skills.mjs";
 export { mapToOwasp } from "./lib/owasp.mjs";
 export { discoverConfigs } from "./lib/discovery.mjs";

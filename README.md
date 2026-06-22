@@ -59,6 +59,7 @@ Or pin it in CI:
 | Server command analysis | Pipe-to-shell, inline code, typosquatting, temp directory spawning |
 | Supply-chain source integrity | Remote/VCS code sources and moving dist-tags (`@latest`) that re-resolve on every launch |
 | Environment variable exposure | API keys, tokens, secrets, cloud credentials passed to servers |
+| Hardcoded credentials | Literal provider tokens (GitHub, AWS, OpenAI, Slack, Stripe, …) and private keys in command/args/env — matched value redacted |
 | Supply chain advisories | 40+ known vulnerable MCP packages via Decoy advisory database |
 | Transport security | HTTP without TLS, missing auth, wildcard CORS, public-bound SSE |
 | Input sanitization | Unconstrained parameters, missing maxLength, open schemas |

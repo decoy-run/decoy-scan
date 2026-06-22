@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  classifyTool, detectPoisoning, analyzeServerCommand, analyzePackageSource, analyzeEnvExposure,
+  classifyTool, detectPoisoning, analyzeServerCommand, analyzePackageSource, analyzeHardcodedSecrets, analyzeEnvExposure,
   analyzeTransport, analyzeReadiness, analyzeInputSanitization,
   analyzePermissionScope, hashToolManifest, detectManifestChanges, analyzeToxicFlows,
 } from "../index.mjs";
@@ -235,6 +235,69 @@ describe("analyzePackageSource", () => {
   it("is reachable through analyzeServerCommand and labels supply-chain types", () => {
     const f = analyzeServerCommand({ command: "npx", args: ["-y", "github:acme/cool-mcp"] });
     assert.ok(f.some(x => x.type === "unpinned-remote-source"));
+  });
+});
+
+// ─── analyzeHardcodedSecrets ───
+
+describe("analyzeHardcodedSecrets", () => {
+  const types = (e) => analyzeHardcodedSecrets(e).map(f => f.type);
+
+  it("flags a hardcoded GitHub token in an env value", () => {
+    const f = analyzeHardcodedSecrets({ env: { GITHUB_TOKEN: "ghp_" + "a".repeat(36) } });
+    assert.ok(f.some(x => x.type === "hardcoded-secret" && x.secretType === "github-token" && x.severity === "critical"));
+  });
+
+  it("flags an AWS access key in args", () => {
+    const f = analyzeHardcodedSecrets({ command: "node", args: ["--aws-key", "AKIA" + "ABCDEFGHIJ123456".slice(0, 16)] });
+    assert.ok(f.some(x => x.secretType === "aws-access-key"));
+  });
+
+  it("flags a Slack token and a Stripe key", () => {
+    assert.ok(types({ env: { SLACK: "xoxb-123456789012-abcdefABCDEF" } }).includes("hardcoded-secret"));
+    assert.ok(analyzeHardcodedSecrets({ env: { STRIPE: "sk_live_" + "a".repeat(24) } }).some(x => x.secretType === "stripe-key"));
+  });
+
+  it("flags an opaque secret value under a sensitive env name", () => {
+    const f = analyzeHardcodedSecrets({ env: { MY_API_KEY: "a1b2c3d4e5f6g7h8i9j0k1l2" } });
+    assert.ok(f.some(x => x.secretType === "credential" && x.severity === "critical"));
+  });
+
+  it("NEVER includes the secret value in the finding (redaction)", () => {
+    const secret = "ghp_" + "z".repeat(36);
+    const f = analyzeHardcodedSecrets({ env: { GH: secret } });
+    const blob = JSON.stringify(f);
+    assert.ok(!blob.includes(secret), "finding must not echo the raw secret");
+    assert.match(blob, /redacted/);
+  });
+
+  it("does NOT flag a ${VAR} reference", () => {
+    assert.deepEqual(types({ env: { GITHUB_TOKEN: "${GITHUB_TOKEN}" } }), []);
+  });
+
+  it("does NOT flag placeholder values", () => {
+    for (const v of ["sk-xxx", "your-token-here", "<your-key>", "changeme", "CHANGE_ME", "xxxxxxxxxxxxxxxx", "%API_KEY%"]) {
+      assert.deepEqual(types({ env: { API_KEY: v } }), [], `placeholder "${v}" should not fire`);
+    }
+  });
+
+  it("does NOT flag a database URL value (env-exposure's job, not a token)", () => {
+    assert.deepEqual(types({ env: { DATABASE_URL: "postgres://user:pass@localhost:5432/db" } }), []);
+  });
+
+  it("does NOT flag a short non-secret env value", () => {
+    assert.deepEqual(types({ env: { NODE_ENV: "production", PORT: "3000" } }), []);
+  });
+
+  it("reports one finding per (location, secret type)", () => {
+    const tok = "ghp_" + "b".repeat(36);
+    const f = analyzeHardcodedSecrets({ env: { GH: tok } });
+    assert.equal(f.filter(x => x.secretType === "github-token").length, 1);
+  });
+
+  it("handles empty/odd entries without throwing", () => {
+    assert.ok(Array.isArray(analyzeHardcodedSecrets({})));
+    assert.ok(Array.isArray(analyzeHardcodedSecrets({ env: null, args: null })));
   });
 });
 

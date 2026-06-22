@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.10.0] - 2026-06-22
+
+### Added
+- **Hardcoded credential detection** (`analyzeHardcodedSecrets`). `env-exposure`
+  flags a sensitive variable *name*; this flags a literal secret *value* sitting
+  in the config (`command`, `args`, or `env` values), which leaks through
+  dotfiles, backups, and version control.
+  - Distinctive provider token shapes — GitHub (`ghp_`, `github_pat_`), AWS
+    (`AKIA`/`ASIA`), OpenAI/Anthropic (`sk-`, `sk-ant-`), Slack (`xox…`), Stripe
+    (`sk_live_`), Google (`AIza`), GitLab (`glpat-`), private-key headers, and
+    `Bearer` tokens. Critical (Bearer: high). Maps to OWASP **ASI03**.
+  - Plus an opaque-token fallback: a concrete high-entropy value under a
+    sensitive env name (e.g. `MY_API_KEY`) is flagged even without a known prefix.
+  - **The matched value is never echoed.** Findings carry only the credential
+    type and location, so scan's terminal output, SARIF, and telemetry can't
+    leak the secret they just found.
+  - Placeholder-aware: `${VAR}` / `%VAR%` references, `<your-token>`, `changeme`,
+    `sk-xxx`, and connection-string URLs do **not** fire.
+- New public export: `analyzeHardcodedSecrets`.
+
+### Verified
+- Suite 167 → 178 (+11 cases, incl. a redaction assertion that no raw secret
+  reaches the finding). Live smoke flagged a hardcoded `ghp_` token and an opaque
+  key (both critical), stayed silent on `${VAR}` refs, placeholders, and DB URLs,
+  and produced zero false positives on real machine configs. Redaction audit on
+  the JSON output: no raw secret present.
+
 ## [0.9.0] - 2026-06-22
 
 ### Added
