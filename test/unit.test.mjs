@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  classifyTool, detectPoisoning, analyzeServerCommand, analyzeEnvExposure,
+  classifyTool, detectPoisoning, analyzeServerCommand, analyzePackageSource, analyzeEnvExposure,
   analyzeTransport, analyzeReadiness, analyzeInputSanitization,
   analyzePermissionScope, hashToolManifest, detectManifestChanges, analyzeToxicFlows,
 } from "../index.mjs";
@@ -171,6 +171,70 @@ describe("analyzeServerCommand", () => {
   it("returns empty for normal server", () => {
     const entry = { command: "node", args: ["server.mjs"] };
     assert.equal(analyzeServerCommand(entry).length, 0);
+  });
+});
+
+// ─── analyzePackageSource ───
+
+describe("analyzePackageSource", () => {
+  const types = (entry) => analyzePackageSource(entry).map(f => f.type);
+
+  it("flags a github: remote source (high)", () => {
+    const f = analyzePackageSource({ command: "npx", args: ["-y", "github:acme/cool-mcp"] });
+    assert.ok(f.some(x => x.type === "unpinned-remote-source" && x.severity === "high"));
+  });
+
+  it("flags a git+https VCS source via --spec (pipx)", () => {
+    const f = analyzePackageSource({ command: "pipx", args: ["run", "--spec", "git+https://example.com/u/r.git", "tool"] });
+    assert.ok(f.some(x => x.type === "unpinned-remote-source"));
+  });
+
+  it("flags a raw https module URL (deno run)", () => {
+    const f = analyzePackageSource({ command: "deno", args: ["run", "-A", "https://example.com/mcp/mod.ts"] });
+    assert.ok(f.some(x => x.type === "unpinned-remote-source"));
+  });
+
+  it("flags a moving dist-tag @latest (medium)", () => {
+    const f = analyzePackageSource({ command: "npx", args: ["-y", "some-mcp@latest"] });
+    assert.ok(f.some(x => x.type === "unpinned-dist-tag" && x.severity === "medium"));
+  });
+
+  it("flags @next on a scoped package", () => {
+    const f = analyzePackageSource({ command: "npx", args: ["@acme/mcp-server@next"] });
+    assert.ok(f.some(x => x.type === "unpinned-dist-tag"));
+  });
+
+  it("flags uvx tool@beta", () => {
+    assert.ok(types({ command: "uvx", args: ["mcp-tool@beta"] }).includes("unpinned-dist-tag"));
+  });
+
+  it("does NOT flag a concrete pinned version", () => {
+    assert.deepEqual(types({ command: "npx", args: ["-y", "some-mcp@1.2.3"] }), []);
+  });
+
+  it("does NOT flag a pinned scoped package", () => {
+    assert.deepEqual(types({ command: "npx", args: ["@acme/mcp-server@2.0.0"] }), []);
+  });
+
+  it("does NOT flag bare unpinned npx (the documented norm)", () => {
+    assert.deepEqual(types({ command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem"] }), []);
+  });
+
+  it("does NOT flag a local path", () => {
+    assert.deepEqual(types({ command: "node", args: ["./dist/server.js"] }), []);
+  });
+
+  it("does NOT flag a non-runner command", () => {
+    assert.deepEqual(types({ command: "node", args: ["server.mjs"] }), []);
+  });
+
+  it("does NOT mistake a pinned-version '@' for a tag", () => {
+    assert.deepEqual(types({ command: "bunx", args: ["thing@10.4.1-rc"] }).filter(t => t === "unpinned-dist-tag"), []);
+  });
+
+  it("is reachable through analyzeServerCommand and labels supply-chain types", () => {
+    const f = analyzeServerCommand({ command: "npx", args: ["-y", "github:acme/cool-mcp"] });
+    assert.ok(f.some(x => x.type === "unpinned-remote-source"));
   });
 });
 

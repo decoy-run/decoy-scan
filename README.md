@@ -57,6 +57,7 @@ Or pin it in CI:
 | Tool manifest hashing | Tool additions, removals, and description changes between scans |
 | Skill scanning | Prompt injection, hardcoded secrets, suspicious URLs in Claude Code skills |
 | Server command analysis | Pipe-to-shell, inline code, typosquatting, temp directory spawning |
+| Supply-chain source integrity | Remote/VCS code sources and moving dist-tags (`@latest`) that re-resolve on every launch |
 | Environment variable exposure | API keys, tokens, secrets, cloud credentials passed to servers |
 | Supply chain advisories | 40+ known vulnerable MCP packages via Decoy advisory database |
 | Transport security | HTTP without TLS, missing auth, wildcard CORS, public-bound SSE |

@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.0] - 2026-06-22
+
+### Added
+- **Supply-chain source integrity** (`analyzePackageSource`). A static scan
+  can't see what a package *will* resolve to, but it can see whether the config
+  lets it change at all. Two configurations re-fetch code on every launch with
+  no review, and both are now flagged:
+  - **`unpinned-remote-source`** (high) — the server runs code straight from a
+    remote/VCS/URL source (`github:`, `git+https://`, a raw `https://` module)
+    instead of a pinned registry package.
+  - **`unpinned-dist-tag`** (medium) — the package is pinned to a moving tag
+    (`@latest`, `@next`, `@beta`, …) that re-resolves on every launch.
+
+  Both map to OWASP **ASI03 (Supply Chain Risk)**. Bare unpinned `npx pkg` (no
+  version) is the documented norm for MCP servers and is deliberately **not**
+  flagged — only genuinely-mutable sources are, to hold the zero-noise bar.
+  Parses through wrapper commands (`node proxy.mjs -- npx pkg@latest`) and the
+  `--package` / `--spec` flags of `pipx` / `uvx` / `deno run` / `bunx` / `dlx`.
+- New public export: `analyzePackageSource`.
+
+### Verified
+- Suite 154 → 167 (+13 cases). Live scan smoke flagged a `github:` source (high)
+  and `@latest` (medium), and correctly stayed silent on pinned versions, bare
+  unpinned `npx`, and local paths. On real machine configs it caught two servers
+  genuinely running `@latest` through a proxy wrapper — zero false positives.
+
 ## [0.8.1] - 2026-05-14
 
 ### Changed
