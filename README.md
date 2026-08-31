@@ -136,7 +136,25 @@ npx decoy-scan --policy=RULES      # CI/CD policy gate (exit 2 on violation)
 npx decoy-scan --verbose           # Show all tools including low-risk
 npx decoy-scan --quiet             # Suppress status output (exit code only)
 npx decoy-scan --no-color          # Disable colored output
+npx decoy-scan --color             # Force color through a pipe
+npx decoy-scan --no-input          # Never prompt; fail instead of waiting
+npx decoy-scan --token-file=PATH   # Read the API token from a file
 ```
+
+Unrecognized flags, commands, and policies are errors, not silent no-ops — a
+typo'd CI gate should fail loudly rather than pass quietly.
+
+### Credentials
+
+`--token=` is visible to every process on the machine via `ps` and lands in
+shell history. In CI, prefer `--token-file=PATH` or `DECOY_TOKEN_FILE`.
+
+| Variable | Meaning |
+|----------|---------|
+| `DECOY_TOKEN` | API token |
+| `DECOY_TOKEN_FILE` | Path to a file containing the API token |
+| `DECOY_TELEMETRY=0` | Disable anonymized telemetry |
+| `NO_COLOR` | Disable colored output |
 
 ## 💡 Explain
 
@@ -162,6 +180,11 @@ Run from your project root to include project-level `.mcp.json` configs.
 | `0` | No critical or high-risk issues |
 | `1` | High-risk issues found |
 | `2` | Critical issues, tool poisoning, toxic flows, or policy violation |
+| `130` | Interrupted with Ctrl-C |
+
+Usage errors (unknown flag, command, or policy) and crashes exit `1`, unchanged
+from earlier versions. In `--json` mode a crash also prints an `error` key, so a
+machine consumer can tell it apart from a real finding.
 
 ## 📚 Library
 

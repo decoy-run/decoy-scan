@@ -21,6 +21,18 @@ import {
 } from "../lib/telemetry.mjs";
 import { verifyFindings } from "../lib/verify.mjs";
 import { resolveTier, isPaidTier } from "../lib/tier.mjs";
+import {
+  EXIT_USAGE,
+  findUnknownFlag,
+  reportUnknownFlag,
+  reportUnknownCommand,
+  nearest,
+  resolveColor,
+  canPrompt,
+  fetchWithTimeout,
+  isTimeoutError,
+  onInterrupt,
+} from "../lib/argv.mjs";
 
 // Persisted token location — written by `login`, read by --report.
 const TOKEN_FILE = join(homedir(), ".decoy", "token");
@@ -34,6 +46,17 @@ const VERSION = PKG.version;
 // ─── Args ───
 
 const args = process.argv.slice(2);
+
+// Every flag decoy-scan accepts. Anything else is a typo, and a typo that
+// silently scans-and-passes is worse than no scan at all.
+const KNOWN_FLAGS = new Set([
+  "json", "brief", "sarif", "no-probe", "no-advisories", "report", "share",
+  "verify", "skills", "fix", "policy", "token", "token-file", "no-telemetry",
+  "yes", "y", "verbose", "v", "quiet", "q", "no-input", "no-color", "color",
+  "version", "V", "help", "h",
+]);
+const COMMANDS = ["explain", "login"];
+
 const briefMode = args.includes("--brief");
 // --brief implies --json (it's the "Minimal JSON summary" form per --help).
 const jsonMode = args.includes("--json") || briefMode;
@@ -51,39 +74,107 @@ const verifyMode = args.includes("--verify");
 const fixMode = args.includes("--fix");
 const skillsMode = args.includes("--skills");
 const yesMode = args.includes("--yes") || args.includes("-y");
-const policyArg = args.find(a => a.startsWith("--policy="))?.split("=")[1];
+// Policy values contain their own "=" (max-critical=0), so keep everything
+// after the first one.
+const flagValue = (name) => {
+  const arg = args.find(a => a.startsWith(`--${name}=`));
+  return arg ? arg.slice(name.length + 3) : null;
+};
+const policyArg = flagValue("policy");
 function loadStoredToken() {
   try {
     const t = readFileSync(TOKEN_FILE, "utf8").trim();
     return t.length >= 16 ? t : null;
   } catch { return null; }
 }
-const tokenArg = args.find(a => a.startsWith("--token="))?.split("=")[1] || process.env.DECOY_TOKEN || loadStoredToken();
+// A token passed as --token= is visible to every other process on the box via
+// `ps`, and lands in shell history. --token-file/DECOY_TOKEN_FILE reads it
+// from a file instead; that is the form to use in CI.
+function loadTokenFile(path) {
+  try {
+    const t = readFileSync(path, "utf8").trim();
+    if (t.length < 16) {
+      process.stderr.write(`error: token file ${path} does not contain a valid token\n`);
+      process.exit(EXIT_USAGE);
+    }
+    return t;
+  } catch (e) {
+    process.stderr.write(`error: cannot read token file ${path}: ${e.message}\n`);
+    process.exit(EXIT_USAGE);
+  }
+}
+const tokenFileArg = flagValue("token-file") || process.env.DECOY_TOKEN_FILE;
+const tokenArg = (tokenFileArg ? loadTokenFile(tokenFileArg) : null)
+  || flagValue("token")
+  || process.env.DECOY_TOKEN
+  || loadStoredToken();
 
 // Positional commands (first non-flag arg).
 const positionals = args.filter(a => !a.startsWith("-") && !a.includes("="));
 const command = positionals[0];
 const commandArg = positionals[1];
 
+// ─── Argument validation ───
+
+const unknown = findUnknownFlag(args, KNOWN_FLAGS);
+if (unknown) {
+  reportUnknownFlag(unknown, KNOWN_FLAGS, "decoy-scan");
+  process.exit(EXIT_USAGE);
+}
+
+// A bare `decoy-scan` scans; anything else in command position must be a real
+// command. Falling through to a scan on `decoy-scan expain critical` hid the
+// mistake behind 40 lines of unrelated output.
+if (command && !COMMANDS.includes(command)) {
+  reportUnknownCommand(command, COMMANDS, "decoy-scan");
+  process.exit(EXIT_USAGE);
+}
+
+// Policy names are checked before any scanning happens. A typo'd gate used to
+// print a yellow warning and let the run exit 0 — a CI gate that silently
+// stops gating is the worst possible failure here.
+const POLICY_NAMES = ["no-critical", "no-high", "no-toxic-flows", "no-poisoning", "no-secrets", "require-tripwires"];
+const MAX_POLICY_LEVELS = ["critical", "high", "medium", "low", "toxic-flows"];
+if (policyArg !== null) {
+  for (const policy of policyArg.split(",").map(p => p.trim()).filter(Boolean)) {
+    if (POLICY_NAMES.includes(policy)) continue;
+    const max = policy.match(/^max-([\w-]+)=(\d+)$/);
+    if (max && MAX_POLICY_LEVELS.includes(max[1])) continue;
+    process.stderr.write(`error: unknown policy "${policy}"\n`);
+    const guess = nearestPolicy(policy);
+    if (guess) process.stderr.write(`  Did you mean "${guess}"?\n`);
+    process.stderr.write(`  Valid: ${POLICY_NAMES.join(", ")}, max-<level>=N\n`);
+    process.exit(EXIT_USAGE);
+  }
+}
+function nearestPolicy(policy) {
+  const base = policy.split("=")[0];
+  // For a max- policy the mistake is almost always in the level, so match on
+  // that alone — "max-crit" is far from "max-critical" but "crit" is close
+  // to "critical".
+  if (base.startsWith("max-")) {
+    const level = nearest(base.slice(4), MAX_POLICY_LEVELS);
+    return level ? `max-${level}=N` : null;
+  }
+  return nearest(base, POLICY_NAMES);
+}
+
 // ─── Flag conflicts ───
 
 if (jsonMode && sarifMode) {
   process.stderr.write("error: --json and --sarif are mutually exclusive\n");
-  process.exit(1);
+  process.exit(EXIT_USAGE);
 }
 
 if (verboseMode && quietMode) {
   process.stderr.write("error: --verbose and --quiet are mutually exclusive\n");
-  process.exit(1);
+  process.exit(EXIT_USAGE);
 }
 
 // ─── Color support ───
 
 const isTTY = process.stderr.isTTY;
-const noColor = args.includes("--no-color") ||
-  "NO_COLOR" in process.env ||
-  process.env.TERM === "dumb" ||
-  (!isTTY && !process.env.FORCE_COLOR);
+const noColor = !resolveColor(args, process.stderr);
 
 const c = noColor
   ? { bold: "", dim: "", muted: "", red: "", green: "", yellow: "", orange: "", cyan: "", magenta: "", white: "", underline: "", reset: "" }
@@ -166,21 +257,39 @@ function wrapToolList(names, indent = 4, color = "") {
   return lines.map((l) => `${pad}${color}${l}${color ? c.reset : ""}`).join("\n");
 }
 
+// Tracked so the interrupt handler can clear whatever is on the line and put
+// the cursor back before the shell prompt returns.
+let activeSpinner = null;
+
 function spinner(label) {
   if (!isTTY || quietMode) return { stop() {} };
   const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   let i = 0;
+  const started = Date.now();
+  process.stderr.write("\x1b[?25l");
   const id = setInterval(() => {
-    process.stderr.write(`\r  ${c.dim}${frames[i++ % frames.length]} ${label}${c.reset}`);
+    // Past a few seconds, show elapsed time so a slow probe reads as working
+    // rather than wedged.
+    const secs = Math.round((Date.now() - started) / 1000);
+    const elapsed = secs >= 3 ? ` ${c.dim}(${secs}s)${c.reset}` : "";
+    process.stderr.write(`\r\x1b[K  ${c.dim}${frames[i++ % frames.length]} ${label}${c.reset}${elapsed}`);
   }, 80);
-  return {
+  const handle = {
     stop(finalMsg) {
       clearInterval(id);
-      process.stderr.write("\r\x1b[K");
+      process.stderr.write("\r\x1b[K\x1b[?25h");
+      if (activeSpinner === handle) activeSpinner = null;
       if (finalMsg) status(finalMsg);
     },
   };
+  activeSpinner = handle;
+  return handle;
 }
+
+onInterrupt(() => {
+  activeSpinner?.stop();
+  process.stderr.write("\x1b[?25h");
+});
 
 // ─── Interactive sign-in ───
 
@@ -205,6 +314,16 @@ function prompt(question) {
   });
 }
 
+// Nothing here may block on a prompt that can never be answered. When stdin is
+// a pipe (CI, `| tee`, an agent driving the CLI) or --no-input is set, say
+// which flag would have supplied the answer and exit.
+function requireInteractive(what, hint) {
+  if (canPrompt(args)) return;
+  process.stderr.write(`error: ${what} needs an interactive terminal\n`);
+  process.stderr.write(`  ${hint}\n`);
+  process.exit(EXIT_USAGE);
+}
+
 function saveStoredToken(token) {
   mkdirSync(dirname(TOKEN_FILE), { recursive: true });
   writeFileSync(TOKEN_FILE, token + "\n", { mode: 0o600 });
@@ -213,6 +332,10 @@ function saveStoredToken(token) {
 // Walks the user through sign-in: opens browser, prompts for token paste,
 // saves it. Returns the token on success, null if the user bailed.
 async function loginInteractive() {
+  requireInteractive(
+    "sign-in",
+    "Pass an existing token instead: --token-file=PATH, or set DECOY_TOKEN_FILE.",
+  );
   const url = "https://app.decoy.run/dashboard?tab=settings#s-setup";
   status("");
   status(`  ${c.bold}Sign in to Decoy${c.reset}`);
@@ -278,13 +401,17 @@ ${c.bold}Flags:${c.reset}
       --sarif             SARIF 2.1.0 output
       --no-probe          Config-only scan — don't spawn servers
       --no-advisories     Skip advisory database lookup
+      --skills            Scan Claude Code skills for injection and secrets
+      --verify            AI-revalidate findings (5/mo free, unlimited on Team)
+      --fix               Print a remediation plan (does not edit any config)
+      --policy list       Fail the run on policy violations (see below)
       --report            Upload results to Decoy dashboard
       --share             Generate a shareable public URL for results
-      --verify            AI-revalidate findings (5/mo free, unlimited on Team)
-      --skills            Scan Claude Code skills for injection and secrets
-      --token string      API token (or set DECOY_TOKEN env var)
+      --token string      API token — visible in \`ps\`, prefer --token-file
+      --token-file path   Read the API token from a file
       --no-telemetry      Disable anonymized telemetry (or set DECOY_TELEMETRY=0)
   -y, --yes               Skip confirmation prompts (for CI use)
+      --no-input          Never prompt; fail instead of waiting for input
   -v, --verbose           Show all tools including low-risk
   -q, --quiet             Suppress status output
       --no-color          Disable colored output
@@ -292,9 +419,19 @@ ${c.bold}Flags:${c.reset}
   -V, --version           Show version
   -h, --help              Show this help
 
+${c.bold}Policies:${c.reset} ${c.dim}--policy=no-critical,max-high=5${c.reset}
+  no-critical  no-high  no-toxic-flows  no-poisoning  no-secrets
+  require-tripwires    max-critical=N  max-high=N  max-toxic-flows=N
+
+${c.bold}Environment:${c.reset}
+  DECOY_TOKEN         API token (--token-file is safer)
+  DECOY_TOKEN_FILE    Path to a file containing the API token
+  DECOY_TELEMETRY=0   Disable anonymized telemetry
+  NO_COLOR            Disable colored output
+
 ${c.bold}Exit codes:${c.reset}
   0  No critical or high-risk issues
-  1  High-risk issues found
+  1  High-risk issues found, or the command failed
   2  Critical issues or tool poisoning found
 
 ${c.bold}What it scans:${c.reset}
@@ -312,6 +449,10 @@ ${c.bold}What it checks:${c.reset}
 ${c.bold}Agent integration:${c.reset}
   This CLI ships with AGENTS.md for AI agent reference.
   Use --json for structured output. Use --brief for minimal summaries.
+
+${c.bold}Learn more:${c.reset}
+  Docs         ${c.cyan}https://decoy.run/docs${c.reset}
+  Report a bug ${c.cyan}https://github.com/decoy-run/decoy-scan/issues${c.reset}
 `);
   process.exit(0);
 }
@@ -577,6 +718,15 @@ async function main() {
     status(`  ${c.dim}Config scan only — run without --no-probe to discover tools and get full analysis.${c.reset}`);
   }
 
+  // Poisoning findings on non-decoy servers. Hoisted to main() scope because
+  // the --policy=no-poisoning gate below reads it too; as a local inside
+  // computeExitCode it threw "nonDecoyPoisoned is not defined" and took the
+  // whole run down — including the GitHub Action's default
+  // `--policy=no-critical,no-poisoning`.
+  const nonDecoyPoisoned = results.servers
+    .filter(srv => !srv.decoy)
+    .reduce((n, srv) => n + srv.findings.filter(f => f.source === "tool-description").length, 0);
+
   // Compute exit code based on severity (shared across all output modes)
   function computeExitCode(results) {
     const toolCounts = { critical: 0, high: 0 };
@@ -587,7 +737,6 @@ async function main() {
         if (t.risk === "high") toolCounts.high++;
       }
     }
-    const nonDecoyPoisoned = results.servers.filter(srv => !srv.decoy).reduce((n, srv) => n + srv.findings.filter(f => f.source === "tool-description").length, 0);
     const hasToxicFlows = results.toxicFlows?.length > 0;
     const hasSkillIssues = results.summary.skillIssues > 0;
     // Include static config findings (env exposure, pipe-to-shell, transport) in all output modes
@@ -632,7 +781,7 @@ async function main() {
   // Quiet mode without machine output: exit silently with proper code
   if (quietMode) {
     writeScanCache(results);
-    process.exit(scanExitCode);
+    return exitWhenDrained(scanExitCode);
   }
 
   // ─── Pretty output ───
@@ -920,6 +1069,12 @@ async function main() {
       status("");
       status(`  ${c.muted}--report uploads results to your dashboard for history, threat-intel matching,${c.reset}`);
       status(`  ${c.muted}and trend tracking. You'll need to sign in once.${c.reset}`);
+      if (!yesMode) {
+        requireInteractive(
+          "--report without a token",
+          "Sign in once with `npx decoy-scan login`, or pass --token-file=PATH.",
+        );
+      }
       const answer = yesMode ? "y" : await prompt(`  Sign in now? [Y/n] `);
       if (answer && /^n/i.test(answer)) {
         status(`  ${c.dim}Skipped. Run ${c.reset}${c.dim}npx decoy-scan login${c.reset}${c.dim} when you're ready.${c.reset}`);
@@ -930,11 +1085,11 @@ async function main() {
     }
     const sp = spinner("Uploading results…");
     try {
-      const resp = await fetch("https://app.decoy.run/api/scan/upload", {
+      const resp = await fetchWithTimeout("https://app.decoy.run/api/scan/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
         body: JSON.stringify({ results }),
-      });
+      }, 30000);
       const d = await resp.json();
       sp.stop();
       if (d.ok) {
@@ -946,8 +1101,13 @@ async function main() {
       }
     } catch (e) {
       sp.stop();
-      status(`  ${c.red}Upload failed: ${e.message}${c.reset}`);
-      status(`  ${c.dim}Check your network connection and try again.${c.reset}`);
+      if (isTimeoutError(e)) {
+        status(`  ${c.red}Upload timed out after 30s.${c.reset}`);
+        status(`  ${c.dim}The scan itself succeeded — re-run with --report to retry the upload.${c.reset}`);
+      } else {
+        status(`  ${c.red}Upload failed: ${e.message}${c.reset}`);
+        status(`  ${c.dim}Check your network connection and try again.${c.reset}`);
+      }
     }
   }
 
@@ -1023,18 +1183,14 @@ async function main() {
           if (!hasDecoyServer) violations.push("No tripwires installed");
           break;
         }
-        default:
-          if (!policy.startsWith("max-")) {
-            status(`  ${c.yellow}Unknown policy: ${policy}${c.reset}`);
-          } else {
-            // max-critical=0, max-high=5, etc.
-            const [, level, maxStr] = policy.match(/^max-(\w+)=(\d+)$/) || [];
-            const max = parseInt(maxStr);
-            if (level && !isNaN(max)) {
-              const count = level === "toxic-flows" ? (results.toxicFlows?.length || 0) : (toolCounts[level] || 0);
-              if (count > max) violations.push(`${count} ${level} exceeds max ${max}`);
-            }
-          }
+        default: {
+          // max-critical=0, max-high=5, max-toxic-flows=2 — the name and the
+          // numeric bound were both validated before the scan started.
+          const [, level, maxStr] = policy.match(/^max-([\w-]+)=(\d+)$/) || [];
+          const max = parseInt(maxStr, 10);
+          const count = level === "toxic-flows" ? (results.toxicFlows?.length || 0) : (toolCounts[level] || 0);
+          if (count > max) violations.push(`${count} ${level} exceeds max ${max}`);
+        }
       }
     }
 
@@ -1051,30 +1207,16 @@ async function main() {
 
   // --share: upload results and get a shareable public URL
   if (shareMode) {
+    // Publishing to a public URL is irreversible from the CLI's side, so the
+    // prompt defaults to no and non-interactive runs must opt in with --yes.
     if (!yesMode) {
-      const stdinIsTTY = process.stdin.isTTY;
-      if (!stdinIsTTY) {
-        process.stderr.write("error: --share requires --yes flag in non-interactive mode\n");
-        process.exit(1);
-      }
-      process.stderr.write("Warning: --share uploads scan results (server names, tools, findings) to a public URL.\nContinue? [y/N] ");
-      const answer = await new Promise(resolve => {
-        process.stdin.setRawMode?.(false);
-        process.stdin.resume();
-        process.stdin.setEncoding("utf8");
-        let buf = "";
-        const timeout = setTimeout(() => { process.stdin.pause(); resolve(""); }, 30000);
-        process.stdin.on("data", chunk => {
-          buf += chunk;
-          if (buf.includes("\n")) {
-            clearTimeout(timeout);
-            process.stdin.pause();
-            resolve(buf.trim().toLowerCase());
-          }
-        });
-      });
+      requireInteractive("--share", "Pass --yes to confirm publishing non-interactively.");
+      status("");
+      status(`  ${c.yellow}--share publishes this report at a public URL.${c.reset}`);
+      status(`  ${c.dim}It will include server names, tool names, and findings.${c.reset}`);
+      const answer = (await prompt(`  Publish? [y/N] `)).toLowerCase();
       if (answer !== "y" && answer !== "yes") {
-        status("  Aborted.");
+        status("  Aborted. Nothing was uploaded.");
         process.exit(0);
       }
     }
@@ -1084,11 +1226,11 @@ async function main() {
         results: { ...results, tool: "decoy-scan", version: VERSION },
         timestamp: results.timestamp,
       };
-      const resp = await fetch("https://app.decoy.run/api/share", {
+      const resp = await fetchWithTimeout("https://app.decoy.run/api/share", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-      });
+      }, 30000);
       const d = await resp.json();
       sp.stop();
       if (d.url) {
@@ -1222,9 +1364,22 @@ function writeScanCache(results) {
 // deferred exit fires — corrupting `--json` output on fast hosts.
 if (command !== "explain" && command !== "login") {
   main().catch(e => {
-    status(`  ${c.red}error:${c.reset} ${e.message}`);
-    if (verboseMode) status(`  ${c.dim}${e.stack}${c.reset}`);
-    status(`  ${c.dim}Hint: Run with --verbose for full stack trace, or report at https://github.com/decoy-run/decoy-scan/issues${c.reset}`);
+    // Exits 1, as it always has. A crash is arguably not the same thing as
+    // "high-risk issues found", but changing a published exit code could break
+    // a pipeline that branches on it — the `error` key below is how a machine
+    // consumer tells the two apart.
+    if (jsonMode || sarifMode) {
+      data(JSON.stringify({
+        tool: "decoy-scan",
+        version: VERSION,
+        error: e.message,
+        exitCode: 1,
+      }));
+    }
+    process.stderr.write(`  ${c.red}error:${c.reset} ${e.message}\n`);
+    if (verboseMode) process.stderr.write(`  ${c.dim}${e.stack}${c.reset}\n`);
+    process.stderr.write(`  ${c.dim}This is a bug in decoy-scan. Re-run with --verbose and report it:${c.reset}\n`);
+    process.stderr.write(`  ${c.dim}https://github.com/decoy-run/decoy-scan/issues/new${c.reset}\n`);
     process.exit(1);
   });
 }

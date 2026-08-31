@@ -4,6 +4,63 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.11.0] - 2026-08-31
+
+A CLI usability pass against the [Command Line Interface Guidelines](https://clig.dev).
+Nothing about detection changed; how the tool behaves when you get an
+invocation wrong did.
+
+### Fixed
+- **`--policy=no-poisoning` crashed the whole run.** `nonDecoyPoisoned` was a
+  local inside `computeExitCode` but the policy gate read it from `main()`
+  scope, so the run died with `nonDecoyPoisoned is not defined` and exited 1
+  after printing a full, apparently-successful report. This is the GitHub
+  Action's default policy (`no-critical,no-poisoning`), so the flagship CI
+  path failed for every user of it. Every policy name now has a regression
+  test.
+- **A misspelled flag no longer runs a silent, different scan.** Parsing was
+  `args.includes("--json")`, so `--jsom` fell through to a human-mode scan that
+  exited 0 — which a CI job reads as a clean pass. Every flag is now registered,
+  and an unrecognized one is an error with a spelling suggestion.
+- **A misspelled command no longer scans instead.** `decoy-scan expain critical`
+  ran a full scan and buried the mistake under 40 lines of unrelated output.
+- **`--policy=max-critical=0` lost its bound.** The value was split on the first
+  `=`, leaving `max-critical`, which then parsed as an unknown policy — the gate
+  silently stopped gating. Policy names are also validated up front now, before
+  any scanning, and an unknown one is an error rather than a yellow warning on
+  an otherwise passing run.
+- **`--color` did nothing.** It was documented but never read, so forcing color
+  through a pipe was impossible.
+- **`--report` and `--share` could hang forever on a pipe** waiting for a prompt
+  that nothing would ever answer.
+- **`--quiet` swallowed fatal errors** and skipped the telemetry/stdout drain on
+  exit.
+- **`NO_COLOR=` (empty) disabled color.** Per no-color.org it should not.
+
+### Added
+- **`--token-file=PATH` and `DECOY_TOKEN_FILE`.** A token in `--token=` is
+  visible to every process on the machine via `ps` and lands in shell history.
+  This is the form to use in CI.
+- **`--no-input`** — never prompt; fail with the flag that would have supplied
+  the answer.
+- **Ctrl-C stops now**, clearing the spinner and restoring the cursor; a second
+  Ctrl-C skips cleanup entirely.
+- **Network calls have deadlines.** A hung upload no longer spins forever.
+- **Elapsed time on the spinner** after a few seconds, so a slow probe reads as
+  working rather than wedged.
+- **`Environment`, `Policies` and `Learn more` sections in `--help`**, and the
+  previously undocumented `--fix` and `--policy` flags.
+
+### Changed
+- In `--json`/`--sarif` mode a fatal error now prints a JSON error object to
+  stdout (`{tool, version, error, exitCode}`) instead of only human text on
+  stderr, so a machine consumer can tell a crash apart from a real finding.
+
+**Exit codes are unchanged.** `0`/`1`/`2` mean exactly what they always have,
+and usage errors and crashes still exit `1`. Distinct codes would be more
+precise, but a published CLI's exit codes are part of its contract and a
+pipeline branching on `$? -eq 1` should not break on an upgrade.
+
 ## [0.10.0] - 2026-06-22
 
 ### Added

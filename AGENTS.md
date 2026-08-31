@@ -71,8 +71,18 @@ import {
 | `--yes`, `-y` | Skip confirmation prompts (for CI use) |
 | `--verbose`, `-v` | Show all tools including low-risk |
 | `--quiet`, `-q` | Suppress status output |
+| `--fix` | Print a remediation plan (does not edit any config) |
+| `--policy=LIST` | CI gate; unknown policy names are a usage error |
+| `--token-file=PATH` | Read the API token from a file (prefer over `--token=`) |
+| `--no-input` | Never prompt; fail instead of waiting for input |
+| `--color` / `--no-color` | Force / disable color |
 | `--version`, `-V` | Print version |
 | `--help`, `-h` | Print help |
+
+Unrecognized flags, commands, and policy names exit `1` with a spelling
+suggestion on stderr, rather than being ignored. When driving this CLI non-interactively,
+pass `--no-input` so any path that would prompt fails fast instead of blocking
+on stdin.
 
 ## `explain` subcommand
 
@@ -142,10 +152,15 @@ Fields:
 - `0` — No critical or high-risk issues
 - `1` — High-risk issues found
 - `2` — Critical issues or tool poisoning found
+- `130` — Interrupted with Ctrl-C
+
+Usage errors and crashes exit `1`, the same code as "high-risk issues found".
 
 The exit code is also surfaced as `exitCode` on `--json` and `--brief`
 output, so agents can branch on it without re-deriving severity from
-`summary` counts.
+`summary` counts. On exit `1`, check for an `error` key before trusting the
+severity reading: a crash emits `{tool, version, error, exitCode}` on stdout and
+produced no verdict, where a real finding emits the full scan object.
 
 ## Supported Hosts (7)
 

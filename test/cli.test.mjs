@@ -561,3 +561,71 @@ describe("explain", () => {
     assert.ok(elapsed < 3000, `explain took ${elapsed}ms — should be near-instant`);
   });
 });
+
+// ─── Argument hygiene ───
+// `args.includes("--json")` parsing silently ignored typos: `--jsom` ran a
+// full human-mode scan and exited 0, which a CI job reads as a clean pass.
+
+describe("argument hygiene", () => {
+  it("rejects an unknown flag instead of scanning anyway", async () => {
+    const { stderr, exitCode } = await run(["--jsom"]);
+    assert.equal(exitCode, 1);
+    assert.match(stderr, /unknown flag --jsom/);
+  });
+
+  it("suggests the intended flag, including transposed letters", async () => {
+    const { stderr } = await run(["--josn"]);
+    assert.match(stderr, /Did you mean --json\?/);
+  });
+
+  it("rejects an unknown command instead of falling through to a scan", async () => {
+    const { stderr, exitCode } = await run(["expain", "critical"]);
+    assert.equal(exitCode, 1);
+    assert.match(stderr, /Did you mean `decoy-scan explain`\?/);
+  });
+
+  it("rejects an unknown policy before scanning", async () => {
+    const { stderr, exitCode } = await run(["--policy=no-criticl"]);
+    assert.equal(exitCode, 1);
+    assert.match(stderr, /Did you mean "no-critical"\?/);
+  });
+
+  it("keeps the = inside a max- policy value", async () => {
+    // "--policy=max-critical=0".split("=")[1] dropped the bound entirely,
+    // leaving the gate parsing as an unknown policy.
+    const { exitCode } = await run(["--policy=max-critical=0", "--help"]);
+    assert.equal(exitCode, 0);
+  });
+
+  it("refuses to prompt for sign-in when stdin is not a terminal", async () => {
+    const { stderr, exitCode } = await run(["login"]);
+    assert.equal(exitCode, 1);
+    assert.match(stderr, /interactive terminal/);
+  });
+});
+
+// ─── Policy gates ───
+
+describe("policy gates", () => {
+  const POLICIES = [
+    "no-critical", "no-high", "no-poisoning", "no-toxic-flows", "no-secrets",
+    "require-tripwires", "max-critical=0", "max-high=5", "max-toxic-flows=0",
+  ];
+
+  // `nonDecoyPoisoned` was a local inside computeExitCode but was read by the
+  // --policy=no-poisoning branch in main() scope, so the gate threw
+  // "nonDecoyPoisoned is not defined" and took the whole run down. That is the
+  // GitHub Action's default policy, so the flagship CI path always crashed.
+  for (const policy of POLICIES) {
+    it(`--policy=${policy} evaluates without crashing`, async () => {
+      const { stderr } = await run(["--policy=" + policy, "--no-probe", "--no-advisories", "--no-color"]);
+      assert.ok(!/is not defined/.test(stderr), stderr);
+      assert.ok(!/This is a bug in decoy-scan/.test(stderr), stderr);
+    });
+  }
+
+  it("evaluates the Action's default policy pair", async () => {
+    const { stderr } = await run(["--policy=no-critical,no-poisoning", "--no-probe", "--no-advisories", "--no-color"]);
+    assert.ok(!/is not defined/.test(stderr), stderr);
+  });
+});
